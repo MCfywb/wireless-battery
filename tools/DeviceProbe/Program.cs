@@ -1,5 +1,6 @@
 // Phase 0 探针：BLE GATT 拓扑枚举、经典蓝牙 SDP 服务发现，以及（经批准的）RFCOMM 电量查询。
 using System.Diagnostics;
+using System.Text;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Bluetooth.Rfcomm;
@@ -28,6 +29,25 @@ if (args.Contains("--rfcomm"))
 if (args.Contains("--rfcomm-probe"))
 {
     return await ProbeRfcommBatteryAsync(targetName);
+}
+
+// 用户批准的变体矩阵：握手后用不同 ver / vendor 组合查询 0x0207。
+if (args.Contains("--rfcomm-matrix"))
+{
+    return await ProbeRfcommMatrixAsync(targetName);
+}
+
+// 纯监听：连接后不发送任何命令，只观察设备是否自发上报（判断埋点是主动推送还是查询触发）。
+if (args.Contains("--rfcomm-listen"))
+{
+    var ms = 8000;
+    var idx = Array.IndexOf(args, "--listen-ms");
+    if (idx >= 0 && idx + 1 < args.Length && int.TryParse(args[idx + 1], out var parsed))
+    {
+        ms = parsed;
+    }
+
+    return await ProbeRfcommListenAsync(targetName, ms);
 }
 
 static string FormatUuid(Guid uuid)
@@ -231,33 +251,10 @@ static async Task<int> ProbeRfcommBatteryAsync(string targetName)
         return 2;
     }
 
-    Console.WriteLine($"经典蓝牙 ConnectionStatus: {dev.ConnectionStatus}");
-    var svcId = RfcommServiceId.FromUuid(Guid.Parse(VivoPrivateUuid));
-    var r = await dev.GetRfcommServicesForIdAsync(svcId, BluetoothCacheMode.Uncached);
-    Console.WriteLine($"定向 SDP 命中数: {r.Services.Count}  error={r.Error}");
-    if (r.Services.Count == 0)
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
     {
-        Console.WriteLine("SDP 未命中私有通道，放弃连接。");
         return 3;
-    }
-
-    var svc = r.Services[0];
-    Console.WriteLine($"目标通道: host={svc.ConnectionHostName}  service={svc.ConnectionServiceName}");
-
-    var socket = new StreamSocket();
-    try
-    {
-        await socket.ConnectAsync(
-            svc.ConnectionHostName,
-            svc.ConnectionServiceName,
-            SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
-        Console.WriteLine("RFCOMM 连接成功");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine($"RFCOMM 连接失败: {ex.GetType().Name}: {ex.Message} (HResult 0x{ex.HResult:X8})");
-        socket.Dispose();
-        return 4;
     }
 
     // 复用同一个 DataWriter：反复 new + DetachStream 会让底层流被释放，第二次写入即抛 ObjectDisposedException。
@@ -286,6 +283,98 @@ static async Task SendAsync(DataWriter writer, byte[] frame)
     writer.WriteBytes(frame);
     await writer.StoreAsync();
     await writer.FlushAsync();
+}
+
+// 定向 SDP 查询私有通道并建立 RFCOMM 连接；失败时打印原因并返回 null。
+static async Task<StreamSocket?> ConnectPrivateChannelAsync(BluetoothDevice dev, string uuid)
+{
+    Console.WriteLine($"经典蓝牙 ConnectionStatus: {dev.ConnectionStatus}");
+    var svcId = RfcommServiceId.FromUuid(Guid.Parse(uuid));
+    var r = await dev.GetRfcommServicesForIdAsync(svcId, BluetoothCacheMode.Uncached);
+    Console.WriteLine($"定向 SDP 命中数: {r.Services.Count}  error={r.Error}");
+    if (r.Services.Count == 0)
+    {
+        Console.WriteLine("SDP 未命中私有通道，放弃连接。");
+        return null;
+    }
+
+    var svc = r.Services[0];
+    Console.WriteLine($"目标通道: host={svc.ConnectionHostName}  service={svc.ConnectionServiceName}");
+
+    var socket = new StreamSocket();
+    try
+    {
+        await socket.ConnectAsync(
+            svc.ConnectionHostName,
+            svc.ConnectionServiceName,
+            SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+        Console.WriteLine("RFCOMM 连接成功");
+        return socket;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"RFCOMM 连接失败: {ex.GetType().Name}: {ex.Message} (HResult 0x{ex.HResult:X8})");
+        socket.Dispose();
+        return null;
+    }
+}
+
+// 用户批准的变体矩阵（2026-10-26）：握手后依次用不同 ver / vendor 组合查询 0x0207，逐条记录原始响应。
+// 目的：握手响应为 ver=3，与上游「握手 v4 / 电量恒 v4」不一致，需定位本型号实际接受的帧。
+static async Task<int> ProbeRfcommMatrixAsync(string targetName)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+    byte[] handshake = { 0xFF, 0x04, 0x00, 0x00, 0x00, 0x0A, 0x03, 0x00 };
+
+    var variants = new (string Label, byte[] Frame)[]
+    {
+        ("ver=3 vendor=0x001B(vivo)", new byte[] { 0xFF, 0x03, 0x00, 0x00, 0x00, 0x1B, 0x02, 0x07 }),
+        ("ver=3 vendor=0x000A(GAIA)", new byte[] { 0xFF, 0x03, 0x00, 0x00, 0x00, 0x0A, 0x02, 0x07 }),
+        ("ver=4 vendor=0x000A(GAIA)", new byte[] { 0xFF, 0x04, 0x00, 0x00, 0x00, 0x0A, 0x02, 0x07 }),
+        ("ver=4 vendor=0x001B(vivo)", new byte[] { 0xFF, 0x04, 0x00, 0x00, 0x00, 0x1B, 0x02, 0x07 }),
+    };
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备，放弃。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    var writer = new DataWriter(socket.OutputStream);
+
+    Console.WriteLine();
+    Console.WriteLine($"--- 发送握手 0x0300: {Convert.ToHexString(handshake)} ---");
+    await SendAsync(writer, handshake);
+    ReportReceived("握手响应", await CollectAsync(socket, 3000));
+
+    foreach (var (label, frame) in variants)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"--- 电量查询 0x0207 [{label}]: {Convert.ToHexString(frame)} ---");
+        await SendAsync(writer, frame);
+        ReportReceived($"电量响应 [{label}]", await CollectAsync(socket, 3000));
+    }
+
+    writer.DetachStream();
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== 变体矩阵结束（全程只发送握手与电量查询两类命令） ===");
+    return 0;
 }
 
 // 在给定时间窗内收集所有入站字节；超时即返回已收到的部分（可能为空 = 无响应）。
@@ -348,10 +437,31 @@ static void ReportReceived(string label, List<byte> data)
 
         var ver = data[i + 1];
         var flags = data[i + 2];
-        var len = data[i + 3];
-        var vendor = (data[i + 4] << 8) | data[i + 5];
-        var cmd = (data[i + 6] << 8) | data[i + 7];
-        var payloadStart = i + 8;
+
+        // flags 位含义（上游协议记录）：0x01 = 末尾附 1 字节异或校验；0x02 = 长度域扩为 2 字节。
+        // 不处理会整体错位，把 0x8224 误读成 vendor=0x1B82 之类的假命令。
+        int len;
+        int vendorIndex;
+        if ((flags & 0x02) != 0)
+        {
+            len = (data[i + 3] << 8) | data[i + 4];
+            vendorIndex = i + 5;
+        }
+        else
+        {
+            len = data[i + 3];
+            vendorIndex = i + 4;
+        }
+
+        if (vendorIndex + 4 > data.Count)
+        {
+            Console.WriteLine("  [截断帧] 头部不完整");
+            break;
+        }
+
+        var vendor = (data[vendorIndex] << 8) | data[vendorIndex + 1];
+        var cmd = (data[vendorIndex + 2] << 8) | data[vendorIndex + 3];
+        var payloadStart = vendorIndex + 4;
 
         if (payloadStart + len > data.Count)
         {
@@ -360,20 +470,93 @@ static void ReportReceived(string label, List<byte> data)
         }
 
         var payload = data.GetRange(payloadStart, len).ToArray();
-        Console.WriteLine($"  [帧] ver={ver} flags=0x{flags:X2} len={len} vendor=0x{vendor:X4} cmd=0x{cmd:X4} payload={Convert.ToHexString(payload)}");
+        Console.WriteLine($"  [帧] ver={ver} flags=0x{flags:X2} len={len} vendor=0x{vendor:X4} cmd=0x{cmd:X4}");
 
         if (cmd == 0x8300)
         {
-            Console.WriteLine("       → 握手响应 0x8300");
+            Console.WriteLine($"       → 握手响应 0x8300，payload={Convert.ToHexString(payload)}");
         }
         else if (cmd == 0x8207 && payload.Length >= 5)
         {
             Console.WriteLine($"       → 电量 0x8207【按上游假设解析，本型号未验证】左={payload[1]} 右={payload[2]} 仓={payload[3]} 充电位=0x{payload[4]:X2}");
             Console.WriteLine("         位含义（假设）：bit0=左充电 bit1=右充电 bit2=仓充电；数值 >100 或 0xFF = 该部件未知/无效，不得显示为 0");
         }
+        else if (cmd == 0x8224)
+        {
+            ReportTelemetry(payload);
+        }
+        else
+        {
+            Console.WriteLine($"       payload={Convert.ToHexString(payload)}");
+        }
 
         i = payloadStart + len;
     }
+}
+
+// 埋点上报 0x8224：payload 是 JSON，其中的 C 字段按上游记录为左右耳电量，可用于交叉验证 0x8207。
+static void ReportTelemetry(byte[] payload)
+{
+    if (payload.Length == 0 || payload[0] != (byte)'{')
+    {
+        Console.WriteLine($"       埋点 0x8224 payload={Convert.ToHexString(payload)}");
+        return;
+    }
+
+    var json = Encoding.UTF8.GetString(payload);
+    var preview = json.Length > 300 ? json.Substring(0, 300) + "…" : json;
+    Console.WriteLine($"       → 埋点 0x8224 JSON: {preview}");
+    Console.WriteLine($"         提取【按上游记录，尚未与官方 App 交叉验证】C(左右耳电量)={ExtractJson(json, "C")}  B={ExtractJson(json, "B")}  P={ExtractJson(json, "P")}  V(固件)={ExtractJson(json, "V")}");
+}
+
+static string ExtractJson(string json, string key)
+{
+    var marker = $"\"{key}\":\"";
+    var start = json.IndexOf(marker, StringComparison.Ordinal);
+    if (start < 0)
+    {
+        return "-";
+    }
+
+    start += marker.Length;
+    var end = json.IndexOf('"', start);
+    return end < 0 ? "-" : json.Substring(start, end - start);
+}
+
+// 纯监听：建立 RFCOMM 连接后不发任何命令，只收集设备自发上报的帧。
+static async Task<int> ProbeRfcommListenAsync(string targetName, int ms)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备，放弃。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"--- 不发送任何命令，仅监听 {ms} ms ---");
+    ReportReceived($"被动监听 {ms}ms", await CollectAsync(socket, ms));
+
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== 监听结束（全程未发送任何命令） ===");
+    return 0;
 }
 
 // 逐个属性取值：WinRT 对系统占用的服务项常在某些属性上抛 COMException，逐项降级可保留其余信息。
