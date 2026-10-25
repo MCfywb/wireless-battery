@@ -1,10 +1,10 @@
-// Phase 0 只读探针：枚举目标 BLE 设备的服务 / 特征 / 描述符，并读取所有可读特征。
-// 严格遵守「只读」约束：本文件不含任何 GATT 写操作，不发送配对 / 设置 / 固件类命令。
-// 输出可能包含设备地址，仅打印到控制台，不落盘；写入仓库文档前必须脱敏。
+// Phase 0 探针：BLE GATT 拓扑枚举、经典蓝牙 SDP 服务发现，以及（经批准的）RFCOMM 电量查询。
+using System.Diagnostics;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Bluetooth.Rfcomm;
 using Windows.Devices.Enumeration;
+using Windows.Networking.Sockets;
 using Windows.Storage.Streams;
 
 var targetName = args.Length > 0 ? args[0] : "vivo TWS 3i";
@@ -21,6 +21,13 @@ Console.WriteLine();
 if (args.Contains("--rfcomm"))
 {
     return await ProbeRfcommServicesAsync(targetName);
+}
+
+// 已获用户批准的最小写操作集：连接私有 RFCOMM → 握手 0x0300 → 电量查询 0x0207。
+// 只发查询类命令，不发送任何设置 / 配对 / 固件 / 模式切换命令。
+if (args.Contains("--rfcomm-probe"))
+{
+    return await ProbeRfcommBatteryAsync(targetName);
 }
 
 static string FormatUuid(Guid uuid)
@@ -197,6 +204,177 @@ foreach (var info in infos)
 Console.WriteLine();
 Console.WriteLine("=== 探针结束（仅只读操作） ===");
 return 0;
+
+// 最小写操作集（2026-10-26 用户批准）：连接私有 RFCOMM → 握手 0x0300 → 电量查询 0x0207。
+// 只发查询类命令；不发送设置 / 配对 / 固件 / 模式切换命令。
+// 帧格式与命令码依据上游对 vivo TWS 3e / 家族的协议记录，本型号未验证，只作探测假设。
+static async Task<int> ProbeRfcommBatteryAsync(string targetName)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+
+    // FF ver flags len vendor(2) cmd(2) payload
+    byte[] handshake = { 0xFF, 0x04, 0x00, 0x00, 0x00, 0x0A, 0x03, 0x00 };   // 0x0300 ver4 vendor GAIA 0x000A
+    byte[] batteryQuery = { 0xFF, 0x04, 0x00, 0x00, 0x00, 0x1B, 0x02, 0x07 }; // 0x0207 ver4 vendor vivo 0x001B
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备，放弃。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    Console.WriteLine($"经典蓝牙 ConnectionStatus: {dev.ConnectionStatus}");
+    var svcId = RfcommServiceId.FromUuid(Guid.Parse(VivoPrivateUuid));
+    var r = await dev.GetRfcommServicesForIdAsync(svcId, BluetoothCacheMode.Uncached);
+    Console.WriteLine($"定向 SDP 命中数: {r.Services.Count}  error={r.Error}");
+    if (r.Services.Count == 0)
+    {
+        Console.WriteLine("SDP 未命中私有通道，放弃连接。");
+        return 3;
+    }
+
+    var svc = r.Services[0];
+    Console.WriteLine($"目标通道: host={svc.ConnectionHostName}  service={svc.ConnectionServiceName}");
+
+    var socket = new StreamSocket();
+    try
+    {
+        await socket.ConnectAsync(
+            svc.ConnectionHostName,
+            svc.ConnectionServiceName,
+            SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+        Console.WriteLine("RFCOMM 连接成功");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"RFCOMM 连接失败: {ex.GetType().Name}: {ex.Message} (HResult 0x{ex.HResult:X8})");
+        socket.Dispose();
+        return 4;
+    }
+
+    // 复用同一个 DataWriter：反复 new + DetachStream 会让底层流被释放，第二次写入即抛 ObjectDisposedException。
+    var writer = new DataWriter(socket.OutputStream);
+
+    Console.WriteLine();
+    Console.WriteLine($"--- 发送握手 0x0300: {Convert.ToHexString(handshake)} ---");
+    await SendAsync(writer, handshake);
+    ReportReceived("握手响应", await CollectAsync(socket, 3000));
+
+    Console.WriteLine();
+    Console.WriteLine($"--- 发送电量查询 0x0207: {Convert.ToHexString(batteryQuery)} ---");
+    await SendAsync(writer, batteryQuery);
+    ReportReceived("电量响应", await CollectAsync(socket, 3000));
+
+    writer.DetachStream();
+
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== RFCOMM 探测结束（仅发送握手与电量查询两类命令） ===");
+    return 0;
+}
+
+static async Task SendAsync(DataWriter writer, byte[] frame)
+{
+    writer.WriteBytes(frame);
+    await writer.StoreAsync();
+    await writer.FlushAsync();
+}
+
+// 在给定时间窗内收集所有入站字节；超时即返回已收到的部分（可能为空 = 无响应）。
+static async Task<List<byte>> CollectAsync(StreamSocket socket, int ms)
+{
+    var all = new List<byte>();
+    var reader = new DataReader(socket.InputStream) { InputStreamOptions = InputStreamOptions.Partial };
+    var sw = Stopwatch.StartNew();
+    try
+    {
+        while (sw.ElapsedMilliseconds < ms)
+        {
+            var remaining = (int)Math.Max(1, ms - sw.ElapsedMilliseconds);
+
+            // 不能用 CancellationToken 取消 LoadAsync：取消会连带释放底层流，后续写入即抛 ObjectDisposedException。
+            var loadTask = reader.LoadAsync(256).AsTask();
+            var completed = await Task.WhenAny(loadTask, Task.Delay(remaining));
+            if (completed != loadTask)
+            {
+                break;
+            }
+
+            var n = await loadTask;
+            if (n == 0)
+            {
+                break;
+            }
+
+            var buf = new byte[n];
+            reader.ReadBytes(buf);
+            all.AddRange(buf);
+        }
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[接收异常] {ex.GetType().Name}: {ex.Message} (HResult 0x{ex.HResult:X8})");
+    }
+
+    return all;
+}
+
+// 打印原始字节，并按上游帧格式尝试解析（解析结论标注为「未验证假设」）。
+static void ReportReceived(string label, List<byte> data)
+{
+    Console.WriteLine($"[{label}] 收到 {data.Count} 字节" + (data.Count > 0 ? $": {Convert.ToHexString(data.ToArray())}" : "（无响应）"));
+    if (data.Count == 0)
+    {
+        Console.WriteLine("  提示：无响应 ≠ 该型号不支持，可能是版本/vendor 用错、通道退化或需先注册通知链。");
+        return;
+    }
+
+    var i = 0;
+    while (i + 8 <= data.Count)
+    {
+        if (data[i] != 0xFF)
+        {
+            i++;
+            continue;
+        }
+
+        var ver = data[i + 1];
+        var flags = data[i + 2];
+        var len = data[i + 3];
+        var vendor = (data[i + 4] << 8) | data[i + 5];
+        var cmd = (data[i + 6] << 8) | data[i + 7];
+        var payloadStart = i + 8;
+
+        if (payloadStart + len > data.Count)
+        {
+            Console.WriteLine($"  [截断帧] cmd=0x{cmd:X4} 声明 payload {len} 字节，实到 {data.Count - payloadStart} 字节");
+            break;
+        }
+
+        var payload = data.GetRange(payloadStart, len).ToArray();
+        Console.WriteLine($"  [帧] ver={ver} flags=0x{flags:X2} len={len} vendor=0x{vendor:X4} cmd=0x{cmd:X4} payload={Convert.ToHexString(payload)}");
+
+        if (cmd == 0x8300)
+        {
+            Console.WriteLine("       → 握手响应 0x8300");
+        }
+        else if (cmd == 0x8207 && payload.Length >= 5)
+        {
+            Console.WriteLine($"       → 电量 0x8207【按上游假设解析，本型号未验证】左={payload[1]} 右={payload[2]} 仓={payload[3]} 充电位=0x{payload[4]:X2}");
+            Console.WriteLine("         位含义（假设）：bit0=左充电 bit1=右充电 bit2=仓充电；数值 >100 或 0xFF = 该部件未知/无效，不得显示为 0");
+        }
+
+        i = payloadStart + len;
+    }
+}
 
 // 逐个属性取值：WinRT 对系统占用的服务项常在某些属性上抛 COMException，逐项降级可保留其余信息。
 static string? SafeGet(Func<string> getter, out string? error)
