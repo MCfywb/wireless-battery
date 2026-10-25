@@ -35,5 +35,55 @@
       "本机实测：0x8207 电量帧与 0x8300 握手响应均为 ver=3"
     ],
     "_note": "上游参考实现 query_battery() 固定用 version=4，对本型号是错配"
+  },
+
+  "gaiaFrame": {
+    "format": "FF [ver] [flags] [len] [vendor_hi] [vendor_lo] [cmd_hi] [cmd_lo] [payload...]",
+    "flags": {
+      "0x01": "CHECKSUM — 帧尾附 1 字节异或校验",
+      "0x02": "LENGTH_EXTENSION — 长度域扩为 2 字节"
+    },
+    "_source": "官方 App com.vivo.conn.protocol.gaia.rfcomm.Flag 枚举（仅此两个成员）",
+    "errorStatusV3": [
+      "AUTHENTICATING", "NOT_AUTHENTICATED", "INCORRECT_STATE", "COMMAND_NOT_SUPPORTED",
+      "FEATURE_NOT_SUPPORTED", "FEATURE_SPECIFIC", "INVALID_PARAMETER",
+      "INSUFFICIENT_RESOURCES", "IN_PROGRESS"
+    ],
+    "_errorNote": "GAIA V3 存在认证与状态机语义：握手成功但后续命令静默无响应，可能是会话未认证或状态不对"
+  },
+
+  "bleChannels": {
+    "_note": "官方 App assets/bleQuickBond.json 的扫描过滤条件：manufacturerID 2103(=0x0837) 与 uuid_filter 0x0837 —— 0x0837 既是 Fast Pair 厂商标记，也是 vivo TWS 的 BLE 服务 UUID",
+    "officialScanFilters": [
+      { "manufacturerID": "2103", "manufacturerDataArg": "08" },
+      { "manufacturerID": "2103", "manufacturerDataArg": "09" },
+      { "uuid_filter": "00008486-0000-1000-8000-00805f9b34fb" },
+      { "uuid_filter": "00000837-0000-1000-8000-00805f9b34fb" }
+    ],
+    "candidates": [
+      {
+        "name": "E4a",
+        "service": "00000837-0000-1000-8000-00805f9b34fb",
+        "characteristic": "00000838-d102-11e1-9b23-00025b00a5a5",
+        "properties": "Read, Write, Notify",
+        "note": "与 RFCOMM 私有通道同族的 BLE 对应物；直读被拒（ATT 0x13），可写可通知"
+      },
+      {
+        "name": "E4b",
+        "service": "00001100-d102-11e1-9b23-00025b00a5a5",
+        "writeCharacteristic": "00001101-d102-11e1-9b23-00025b00a5a5",
+        "notifyCharacteristic": "00001102-d102-11e1-9b23-00025b00a5a5",
+        "note": "上游记录 iOS App 走此通道；GATT 侧为裸帧 vendor(2)+cmd(2)+payload，无 FF 头"
+      }
+    ]
+  },
+
+  "chargingBits": {
+    "NO_EARBUD_IN_BASE": 0,
+    "LEFT_EARBUD_IN_BASE": 1,
+    "RIGHT_EARBUD_IN_BASE": 2,
+    "LEFT_RIGHT_EARBUDS_IN_BASE": 3,
+    "_source": "官方 App 静态常量；LEFT_EARBUD_CHARGE=1 / RIGHT_EARBUD_CHARGE=2 同值",
+    "_note": "与上游记录一致，但仍需对本型号做控制变量验证"
   }
 }
