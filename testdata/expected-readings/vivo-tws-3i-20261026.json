@@ -1,0 +1,58 @@
+{
+  "_comment": "期望解析结果，字段对齐 docs/development-plan.md §4.1 的 BatteryReading。DeviceId 为脱敏占位符，不含真实蓝牙地址。",
+  "_sourceFrame": "FF030005001B8207005F5BFF00",
+  "_capturedAt": "2026-10-26",
+  "_reproducible": false,
+  "_reproNote": "同批次仅收到一次；随后 4 次监听（8s/8s/60s/矩阵后 10s）均无响应，触发条件未确定。",
+
+  "readings": [
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "LeftEarbud",
+      "Percentage": 95,
+      "IsCharging": false,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia",
+      "DiagnosticCode": null
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "RightEarbud",
+      "Percentage": 91,
+      "IsCharging": false,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia",
+      "DiagnosticCode": null
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "ChargingCase",
+      "Percentage": null,
+      "IsCharging": null,
+      "IsConnected": true,
+      "Quality": "Unavailable",
+      "Source": "RFCOMM:vivo-gaia",
+      "DiagnosticCode": "COMPONENT_NOT_REPORTED_0xFF"
+    }
+  ],
+
+  "_crossCheck": {
+    "channel": "telemetry 0x8224",
+    "field": "C",
+    "value": "95_92",
+    "agreement": "左右耳一致（0x8207 给出 95/91，埋点给出 95/92）；充电盒两路均未给出有效值"
+  },
+
+  "_rules": [
+    "Percentage 只能是 null 或 0..100；0xFF 等越界值必须记为 null（Unavailable），不得钳制、不得显示为 0",
+    "三部件分别返回，不得让未知部件继承同帧中其他部件的值"
+  ]
+}
