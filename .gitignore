@@ -8,3 +8,59 @@ RISKS.md
 RUNBOOK.md
 docs/
 history/
+
+# Build results
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Ll]ogs/
+[Aa]rtifacts/
+[Oo]ut/
+publish/
+[Dd]ebug/
+[Rr]elease/
+[Dd]ebugPublic/
+[Ww]in[Rr]elease/
+[Xx]64/
+[Bb]uild[Ll]og.*
+
+# Visual Studio / Rider / VS Code
+.vs/
+.vscode/
+.idea/
+*.user
+*.userosscache
+*.suo
+*.sln.docstates
+*.userprefs
+
+# MSBuild / NuGet
+*.binlog
+msbuild.log
+msbuild.err
+msbuild.wrn
+project.lock.json
+project.fragment.lock.json
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+.nuget/
+
+# Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+coverage*.json
+coverage*.xml
+
+# Misc
+*.tmp
+*.cache
+*.log
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Note: testdata/sanitized-packets 与 testdata/expected-readings
+# 是脱敏后的协议夹具，属于必须入库的测试资产，故意不忽略。
