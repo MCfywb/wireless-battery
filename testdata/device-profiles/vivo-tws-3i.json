@@ -1,0 +1,39 @@
+{
+  "_comment": "vivo TWS 3i 型号识别依据，提取自官方 vivo TWS App 安装包内的 assets/tws_config.json（只读分析，仅取事实性字段）。用于插件的型号匹配规则，替代按设备名匹配的不可靠做法。",
+  "_extractedAt": "2026-10-26",
+  "_source": "官方 App assets/tws_config.json",
+
+  "matchRules": [
+    { "kind": "modelId", "values": [132, 133], "note": "Fast Pair 广播厂商数据段 [15] 字节；V2 格式下 0xFF 时取 [18:20] 小端扩展 id" },
+    { "kind": "projectName", "values": ["DPD2407A"] },
+    { "kind": "deviceType", "values": [11] },
+    { "kind": "queryCommand", "command": "0x021B", "note": "查询型号后比对，作为第二路校验" }
+  ],
+
+  "variants": [
+    { "model": 144, "name": "vivo TWS 3i 长续航", "projectName": "DPD2407AC", "note": "同属 3i 系列，需独立验证，不得假定与 132/133 完全一致" }
+  ],
+
+  "capabilities": {
+    "noise_reduction": 0,
+    "touch_operation": 2,
+    "audio_effect": 4,
+    "spatial_audio_3d": 2,
+    "find_earphone": 2,
+    "version_upgrade": 3,
+    "dual_connection": 1,
+    "low_latency_gaming": 0,
+    "temperature": 0,
+    "_note": "0 表示不支持。本型号不支持降噪，上游 TWS 3e 的降噪命令不可套用"
+  },
+
+  "protocolStack": {
+    "gaiaVersion": 3,
+    "evidence": [
+      "官方 App 含 com.vivo.conn.protocol.gaia.v3.V3PacketType / V3PacketHandler",
+      "高通 SDK com.qualcomm.qti.gaiaclient.core.gaia.core.v3.packets.V3PacketType",
+      "本机实测：0x8207 电量帧与 0x8300 握手响应均为 ver=3"
+    ],
+    "_note": "上游参考实现 query_battery() 固定用 version=4，对本型号是错配"
+  }
+}
