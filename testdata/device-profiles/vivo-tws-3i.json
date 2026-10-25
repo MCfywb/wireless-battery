@@ -32,9 +32,31 @@
     "evidence": [
       "官方 App 含 com.vivo.conn.protocol.gaia.v3.V3PacketType / V3PacketHandler",
       "高通 SDK com.qualcomm.qti.gaiaclient.core.gaia.core.v3.packets.V3PacketType",
-      "本机实测：0x8207 电量帧与 0x8300 握手响应均为 ver=3"
+      "本机实测：0x8207 电量帧与 0x8300 握手响应均为 ver=3",
+      "上游 test_vivo.py 的 Air3 Pro 真机抓包夹具同为 ver=3，握手响应字节与本机实测一字节相同"
     ],
-    "_note": "上游参考实现 query_battery() 固定用 version=4，对本型号是错配"
+    "_note": "上游 query_battery() 硬编码 version=4，且上游型号表无 TWS 3i（会回退到 v4 默认 profile）——这是查询静默无响应的根因"
+  },
+
+  "upstreamReference": {
+    "repo": "https://github.com/Zhaoyi-ya/TWS-Pods-PC",
+    "license": "GPL-3.0（仅阅读协议事实，未复制代码）",
+    "profiles": {
+      "FAMILY_DEFAULT_V4": { "gaiaVersion": 4, "note": "上游 18 个型号中仅 2 个有专属 profile，其余全落此默认" },
+      "AIR3_PRO_CAPTURED": { "gaiaVersion": 3 },
+      "TWS_3E_V3": { "gaiaVersion": 3 }
+    },
+    "knownGaps": [
+      "型号表无 TWS 3i → select_profile 回退 v4 → 电量查询版本错配",
+      "query_battery() 硬编码 v4，而真机抓包的 0x8207 是 ver=3",
+      "0x8207 是耳机主动推送的 report，不是 0x0207 查询的响应；上游未区分二者"
+    ],
+    "peerTimeRequest": {
+      "command": "0x8509",
+      "note": "耳机主动索要手机时间，上游 probe 注明「必须应答，否则它可能不继续交互」；应答载荷 [世纪,年,月,日,时,分,秒] 纯二进制非 BCD",
+      "appBehavior": "上游 app.py 未实现该应答，仅 probe.py 有"
+    },
+    "gattRawFrame": "去掉 GAIA 头 4 字节（FF/ver/flags/len），只发 vendor(2)+cmd(2)+payload；写特征必须 writeWithoutResponse"
   },
 
   "gaiaFrame": {
