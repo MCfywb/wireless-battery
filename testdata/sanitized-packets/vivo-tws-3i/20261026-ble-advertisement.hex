@@ -18,7 +18,7 @@ Windows 的 `ManufacturerData` 已剥离 CompanyId，下面的偏移以此为基
 | 0 | `08` | — | BLE 类型（固定） | 上游协议记录 |
 | 1 | `01` | — | 协议版本 V1 | 上游协议记录 |
 | 2..7 | `1C 11 2F 27 89 7A` | — | 设备 MAC | 与本机枚举一致 |
-| 8 | `13` | `mBaseStateEarbudsCount` | bit0/1 = 左/右耳在盒；**bit2 = 基座闭合** | `TwsFastPairDeviceBean.isAllEarbudsInBase/isBaseClosed` |
+| 8 | `13` | `f21377m` | **两个字段共用此字节**：低 3 位 = 在盒状态（bit0 左耳在盒 / bit1 右耳在盒 / bit2 基座闭合），**bit3-4 = `mPairState` 连接状态** | `n2/e.java`：`b()` 取 `& 7`、`g()` 取 `(>>3) & 3`；`TwsFastPairDeviceBean.isConnectedState()` = `(mPairState & 2) == 2` |
 | 9 | `64` = 100 | `setBaseBattery` | **充电盒电量 %** | `fastpair/manager/d.java:474` |
 | 10 | `58` = 88 | `setRightBattery` | **右耳电量 %** | `fastpair/manager/d.java:475` |
 | 11 | `5E` = 94 | `setLeftBattery` | **左耳电量 %** | `fastpair/manager/d.java:476` |
@@ -35,6 +35,43 @@ Windows 的 `ManufacturerData` 已剥离 CompanyId，下面的偏移以此为基
 | 11:2x | `94_88` | `58`=88 / `5E`=94 | `64`=100 |
 
 **两通道逐值一致。**
+
+## 偏移 [8] 的双重语义（重要，2026-10-26 11:40 由官方源码确认）
+
+`n2/e.java` 显示，**同一个字节被两个不同用途的 getter 读取**：
+
+```java
+public final int b() { return this.f21377m & 7; }          // → mBaseStateEarbudsCount（在盒状态）
+public final int g() { return (this.f21377m >> 3) & 3; }     // → mPairState（连接/配对状态）
+```
+
+因此 payload[8] = `0x13` = `0b0_00_1_0_0_11` 的完整解读是：
+
+| 位 | 值 | 含义 |
+| --- | --- | --- |
+| bit0 | 1 | 左耳在盒 |
+| bit1 | 1 | 右耳在盒 |
+| bit2 | 1 | 基座闭合 |
+| bit3 | 0 | — |
+| bit4 | 1 | `mPairState` 高位 |
+
+`mPairState = (0x13 >> 3) & 3 = 2` → `isConnectedState()` = `(2 & 2) == 2` = **true**（耳机处于已连接态）。
+
+**推论**：广播里带有连接状态，但**电量字节 [9][10][11] 与之完全独立**——
+连接状态只占 payload[8] 的高 2 位，不与电量位重叠。
+
+## 双连接（手机 + PC 同时连）的影响评估
+
+| 判据 | 结论 | 依据 |
+| --- | --- | --- |
+| 广播是否携带连接数/连接对象 | **否** | `n2/b.java` 全部字段中无此类字段；payload 布局中无对应字节 |
+| 电量位是否依赖连接状态 | **否** | 电量在 [9][10][11]，连接状态在 [8] 的 bit3-4，物理隔离 |
+| App 自身是否依赖广播读电量 | **是** | `fastpair/manager/d.java` 的扫描回调只校验 `type==8 && version==1`，**不检查连接状态** |
+| App 如何识别"连着别的手机" | 通过 `isLocalPhoneConnectedACL()`（反射调 `BluetoothDevice.isConnected()` 隐藏 API）+ `isConnectedState()`（来自广播）组合判断 | `manager/d.java:2507` |
+| 结论 | **双连接下广播照常可读，电量不受影响**；受影响的只是 RFCOMM/GATT 连接（GAIA 会话可能只有一条） | — |
+
+待验证（需真机控制变量，用户配合）：让耳机**同时连上手机与 PC**，重抓广播，
+确认 [9][10][11] 三字节与单连接时一致、[8] 的 bit3-4 是否变化。
 
 ## 结论
 

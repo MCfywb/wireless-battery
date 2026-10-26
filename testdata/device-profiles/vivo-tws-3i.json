@@ -101,14 +101,14 @@
   },
 
   "bleAdvertisement": {
-    "_note": "字段语义由官方 App 源码确认（TwsParserV1 + TwsFastPairDeviceBean），非推测。Windows 的 ManufacturerData 已剥离 CompanyId，下表偏移以此为基准；完整 AD 为 21 字节（含 2 字节 CompanyId）。",
+    "_note": "字段语义由官方 App 源码确认（TwsParserV1 + TwsFastPairDeviceBean + n2/e.java），非推测。Windows 的 ManufacturerData 已剥离 CompanyId，下表偏移以此为基准；完整 AD 为 21 字节（含 2 字节 CompanyId）。",
     "companyId": "0x0837",
     "adLength": 21,
     "layout": [
       { "offset": 0, "size": 1, "field": "bleType", "note": "固定 0x08" },
       { "offset": 1, "size": 1, "field": "version", "note": "V1 = 0x01" },
       { "offset": 2, "size": 6, "field": "mac" },
-      { "offset": 8, "size": 1, "field": "baseStateEarbudsCount", "bits": { "0": "左耳在盒", "1": "右耳在盒", "2": "基座闭合" } },
+      { "offset": 8, "size": 1, "field": "stateByte", "note": "两个字段共用：低 3 位 = 在盒状态，高 2 位 = mPairState 连接状态" },
       { "offset": 9, "size": 1, "field": "baseBatteryPercent", "note": "充电盒电量" },
       { "offset": 10, "size": 1, "field": "rightBatteryPercent" },
       { "offset": 11, "size": 1, "field": "leftBatteryPercent" },
@@ -116,8 +116,45 @@
       { "offset": 13, "size": 1, "field": "modelId" },
       { "offset": 14, "size": 4, "field": "unknown_4bytes", "note": "语义未确认，非电量" }
     ],
+    "stateByteBits": {
+      "0": "左耳在盒",
+      "1": "右耳在盒",
+      "2": "基座闭合",
+      "3-4": "mPairState：&2 → isConnectedState()（耳机已处于连接态，不区分连接对象）"
+    },
     "invalidValue": "0xFF 表示该部件未提供；不得显示为 0",
-    "crossCheck": "与 RFCOMM 埋点 0x8224 的 C 字段（左_右）逐值一致，实测三轮"
+    "crossCheck": "与 RFCOMM 埋点 0x8224 的 C 字段（左_右）逐值一致，实测三轮",
+    "connectionStateInAdvertisement": {
+      "present": true,
+      "where": "offset 8 的 bit3-4",
+      "effectOnBattery": "无——电量在 [9][10][11]，与连接状态位物理隔离",
+      "appBehaviour": "官方 App 的扫描回调不检查连接状态，连接中的设备同样按广播取电量"
+    }
+  },
+
+  "registerChain": {
+    "_note": "GAIA 通知注册链。广播取电路径完全不需要它（广播是耳机主动发，无订阅概念）；仅当需要耳机主动推送 report 时才用。",
+    "prerequisite": "先完成握手：v4 / vendor 0x000A / cmd 0x0300 / 空载荷 → 耳机回 0x8300",
+    "commands": [
+      { "cmd": "0x0202", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8202", "caution": "与「双击手势查询」复用同一命令字；响应 payload [00][左码][右码] 是手势配置而非注册 ACK" },
+      { "cmd": "0x0203", "vendor": "0x001B", "version": 4, "payload": "空", "response": "本机未收到 ACK", "caution": "与「佩戴检测查询」复用同一命令字" },
+      { "cmd": "0x0204", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8204 [00][00]" },
+      { "cmd": "0x0205", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8205 [00][01]（注册单条通知的 ACK）" },
+      { "cmd": "0x0206", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8206 [00][03]" }
+    ],
+    "verifiedOnDevice": "2026-10-26：v4 与 v3 两轮均收到 0x8204/0x8205/0x8206 → 注册被接受；但注册后仍无 0x8207",
+    "upstreamSource": "vivo_protocol.py REGISTER_CHAIN（注释标注 [实测]）"
+  },
+
+  "dualConnection": {
+    "_note": "本型号支持双连接（tws_config.json: dual_connection=1）。耳机开盖即自动连接手机与 PC。",
+    "officialModule": "com.vivo.tws.dualconnection.*（14 个类）+ com.vivo.tws.bean.DualConnectionData",
+    "deviceIdentification": "DualConnectionData.Device 以 COD（Class of Device，INDEX_COD=6）识别设备，而非按产品名匹配",
+    "appConnectEligibility": "manager/d.java checkDeviceConnectedWithOtherPhone：仅当 !isConnectedState() && !isLocalPhoneConnected() && !isLocalPhoneConnectedACL() 才视为可连接候选",
+    "affectsBatteryRead": false,
+    "reason": "取数走 BLE 广播被动监听，不建立连接；广播 payload 不含连接数或连接对象字段，电量位与连接状态位物理隔离",
+    "affectsGaiaChannel": true,
+    "gaiaNote": "双连接下 GAIA 会话可能只有一条，另一侧只能走 A2DP/AVRCP——这正是 PC 侧注册链后仍收不到部分 report 的可能原因之一"
   },
 
   "chargingBits": {
