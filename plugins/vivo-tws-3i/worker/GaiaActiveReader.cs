@@ -29,6 +29,8 @@ internal static class GaiaActiveReader
 
     private const int SdpTimeoutMs = 20000;
     private const int ConnectTimeoutMs = 15000;
+    private const int FindTimeoutMs = 10000;
+    private const int SendTimeoutMs = 5000;
     private const int HandshakeResponseMs = 3000;
     // 对齐参考探针 E2：每条注册命令间隔 1.2s，给设备足够处理时间（避免 ACK 漏收）。
     private const int RegisterGapMs = 1200;
@@ -89,7 +91,7 @@ internal static class GaiaActiveReader
             var handshake = VivoTwsGaiaFrameReader.Build(
                 HandshakeVersion, VivoTwsGaiaFrameReader.VendorGaia,
                 VivoTwsGaiaFrameReader.CommandHandshake, []);
-            await SendAsync(writer, handshake).ConfigureAwait(false);
+            await SendAsync(writer, handshake, diagnostics).ConfigureAwait(false);
 
             var handshakeBytes = await reader.CollectAsync(HandshakeResponseMs, cancellationToken)
                 .ConfigureAwait(false);
@@ -113,7 +115,7 @@ internal static class GaiaActiveReader
             {
                 var frame = VivoTwsGaiaFrameReader.Build(
                     HandshakeVersion, VivoTwsGaiaFrameReader.VendorVivo, cmd, []);
-                await SendAsync(writer, frame).ConfigureAwait(false);
+                await SendAsync(writer, frame, diagnostics).ConfigureAwait(false);
                 await Task.Delay(RegisterGapMs, cancellationToken).ConfigureAwait(false);
             }
 
@@ -207,16 +209,48 @@ internal static class GaiaActiveReader
     private static async Task<BluetoothDevice?> FindDeviceAsync(
         string deviceName, List<string> diagnostics)
     {
-        var infos = await DeviceInformation.FindAllAsync(
-            BluetoothDevice.GetDeviceSelectorFromDeviceName(deviceName)).AsTask().ConfigureAwait(false);
+        var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(deviceName);
+        var infos = await WithTimeout(
+            DeviceInformation.FindAllAsync(selector).AsTask(),
+            FindTimeoutMs, diagnostics, "find").ConfigureAwait(false);
 
-        diagnostics.Add($"active:classicCandidates={infos.Count}");
-        if (infos.Count == 0)
+        diagnostics.Add($"active:classicCandidates={infos?.Count ?? -1}");
+        if (infos is null || infos.Count == 0)
         {
             return null;
         }
 
-        return await BluetoothDevice.FromIdAsync(infos[0].Id).AsTask().ConfigureAwait(false);
+        var device = await WithTimeout(
+            BluetoothDevice.FromIdAsync(infos[0].Id).AsTask(),
+            FindTimeoutMs, diagnostics, "fromId").ConfigureAwait(false);
+
+        diagnostics.Add($"active:fromId={(device is null ? "null" : device.ConnectionStatus.ToString())}");
+        return device;
+    }
+
+    /// <summary>
+    /// 给没有内建超时的 WinRT 异步调用套一层超时兜底。
+    /// </summary>
+    /// <remarks>
+    /// <para><b>为什么必须加</b>：<c>DeviceInformation.FindAllAsync</c> 与
+    /// <c>BluetoothDevice.FromIdAsync</c> 没有内建超时。当设备经历频繁连接/断开或
+    /// 上一次 RFCOMM 会话残留半开状态时，WinRT 蓝牙枚举可能长时间不返回，
+    /// 进而拖垮整个主动读取直到宿主 90s 超时（实测现象）。</para>
+    /// <para>超时只观察、不取消底层任务（取消会让底层流被释放，产生二次异常）；
+    /// 超时即返回 <c>default</c> 并在诊断里留痕，由调用方降级处理。</para>
+    /// </remarks>
+    private static async Task<T?> WithTimeout<T>(
+        Task<T> task, int ms, List<string> diagnostics, string label)
+    {
+        var delay = Task.Delay(ms);
+        var completed = await Task.WhenAny(task, delay).ConfigureAwait(false);
+        if (completed != task)
+        {
+            diagnostics.Add($"active:{label}=timeout({ms}ms)");
+            return default;
+        }
+
+        return await task.ConfigureAwait(false);
     }
 
     private static async Task<StreamSocket?> ConnectAsync(
@@ -267,10 +301,18 @@ internal static class GaiaActiveReader
         }
     }
 
-    private static async Task SendAsync(DataWriter writer, byte[] payload)
+    private static async Task SendAsync(DataWriter writer, byte[] payload, List<string> diagnostics)
     {
         writer.WriteBytes(payload);
-        await writer.StoreAsync().AsTask().ConfigureAwait(false);
+        var store = writer.StoreAsync().AsTask();
+        var delay = Task.Delay(SendTimeoutMs);
+        if (await Task.WhenAny(store, delay).ConfigureAwait(false) != store)
+        {
+            diagnostics.Add($"active:send=timeout({SendTimeoutMs}ms)");
+            return;
+        }
+
+        await store.ConfigureAwait(false);
     }
 
     /// <summary>把主机地址规范为与广播路径一致的 <c>XX:XX:…</c> 大写形式。</summary>

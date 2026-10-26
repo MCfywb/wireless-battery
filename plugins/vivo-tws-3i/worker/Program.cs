@@ -40,6 +40,12 @@ internal static class Program
     /// </remarks>
     private const int ActiveReadListenMs = 20000;
 
+    /// <summary>
+    /// 主动读取的硬上限（毫秒）：必须小于宿主 <c>ActiveReadTimeout = 90s</c>，
+    /// 留出余量让宿主在超时前收到响应。
+    /// </summary>
+    private const int HardTimeoutMs = 80000;
+
     /// <summary>BLE 扫描器启动后的预热时间（毫秒），用于等无线电就绪。</summary>
     private const int ScannerWarmupMs = 2500;
 
@@ -181,10 +187,30 @@ internal static class Program
         var diagnostics = new List<string>();
         var name = matcher.Profile.BluetoothNamePrefixes.FirstOrDefault() ?? "vivo TWS 3i";
 
-        var result = await GaiaActiveReader
-            .ReadAsync(name, ActiveReadListenMs, CancellationToken.None)
-            .ConfigureAwait(false);
+        // 硬上限：即便某步 WinRT 调用意外挂死（设备处于不可查询状态），
+        // 也必须在宿主 90s 超时前返回可控错误，而不是让 UI 干等。
+        var readTask = GaiaActiveReader
+            .ReadAsync(name, ActiveReadListenMs, CancellationToken.None);
+        var hardCap = Task.Delay(HardTimeoutMs);
+        GaiaActiveReader.GaiaActiveReadResult result;
+        if (await Task.WhenAny(readTask, hardCap).ConfigureAwait(false) != readTask)
+        {
+            diagnostics.Add($"active:hardTimeout={HardTimeoutMs / 1000}s");
+            var failed = new PluginResponse
+            {
+                RequestId = requestId,
+                Ok = false,
+                Error = new PluginError
+                {
+                    Code = PluginErrorCodes.InternalError,
+                    Message = "主动读取内部超时：设备可能暂时不可查询，请稍后重试，或先断开再重连该蓝牙设备",
+                },
+            };
+            failed.Diagnostics.AddRange(diagnostics);
+            return failed;
+        }
 
+        result = await readTask.ConfigureAwait(false);
         diagnostics.AddRange(result.Diagnostics);
 
         if (!result.Ok || result.Battery is null || result.DeviceId is null)
