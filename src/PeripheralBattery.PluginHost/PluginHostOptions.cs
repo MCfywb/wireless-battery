@@ -41,6 +41,17 @@ public sealed class PluginHostOptions
     /// <summary>诊断请求超时。</summary>
     public TimeSpan DiagnosticsTimeout { get; set; } = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// 按需主动读取的超时（<see cref="PluginSdk.PluginMethods.ActiveRead"/>）。
+    /// </summary>
+    /// <remarks>
+    /// 必须显著长于 <see cref="PollTimeout"/>：主动读取要完成「SDP 解析 → 建链路 →
+    /// 协议握手 → 注册链 → 短监听等推送 → 断开」整套动作（实测 SDP 解析可耗时数十秒），
+    /// 而被动轮询只是扫一段广播窗口。
+    /// 该值须由实测调优（§5.3）。
+    /// </remarks>
+    public TimeSpan ActiveReadTimeout { get; set; } = TimeSpan.FromSeconds(90);
+
     /// <summary>关闭请求超时。</summary>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
 

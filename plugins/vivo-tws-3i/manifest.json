@@ -28,7 +28,8 @@
     ],
     "readOnly": true,
     "requiresAdministrator": false,
-    "usesNetwork": false
+    "usesNetwork": false,
+    "activeRead": true
   },
   "verification": {
     "status": "hardware-verified",

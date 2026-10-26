@@ -109,11 +109,38 @@ public sealed class MonitoringScheduler : IAsyncDisposable
         }
     }
 
-    /// <summary>立即触发一次全部插件轮询（托盘「立即刷新」）。</summary>
+    /// <summary>
+    /// 立即触发一次全部插件读取（托盘「立即刷新」）。
+    /// </summary>
+    /// <remarks>
+    /// 按 D-010：用户**显式点击**时才走主动路径（<see cref="IPluginClient.ActiveReadAsync"/>），
+    /// 允许插件主动连接设备以取得新值；插件不支持时回退到被动读取。
+    /// 定时轮询（<see cref="PluginLoopAsync"/>）**始终被动**，绝不自动走主动路径。
+    /// </remarks>
     public async Task RefreshNowAsync()
     {
-        var tasks = _clients.Select((_, i) => PollOnceAsync(i, CancellationToken.None)).ToArray();
+        var tasks = _clients
+            .Select((_, i) => ActiveReadOnceAsync(i, CancellationToken.None))
+            .ToArray();
         await Task.WhenAll(tasks).ConfigureAwait(false);
+    }
+
+    /// <summary>主动读取一次；插件不支持时回退到被动读取。</summary>
+    private async Task ActiveReadOnceAsync(int index, CancellationToken token)
+    {
+        var client = _clients[index];
+        var outcome = await client.ActiveReadAsync(token).ConfigureAwait(false);
+
+        if (!outcome.Ok
+            && string.Equals(outcome.ErrorCode, PluginErrorCodes.UnsupportedRequest, StringComparison.Ordinal))
+        {
+            // 插件不支持主动读取：回退被动，功能不降为零。
+            _log?.Invoke($"插件 {client.PluginId} 不支持主动读取，回退被动读取");
+            await PollOnceAsync(index, token).ConfigureAwait(false);
+            return;
+        }
+
+        ApplyOutcome(client, outcome);
     }
 
     private async Task PluginLoopAsync(int index, CancellationToken token)
@@ -156,57 +183,63 @@ public sealed class MonitoringScheduler : IAsyncDisposable
         try
         {
             var outcome = await client.PollAsync(token).ConfigureAwait(false);
-            var now = _clock.UtcNow;
-
-            if (!outcome.Ok)
-            {
-                _log?.Invoke($"插件 {client.PluginId} 读取失败：{outcome.ErrorCode} {outcome.ErrorMessage}");
-
-                if (outcome.Readings.Count == 0 && outcome.ErrorCode is { } code)
-                {
-                    // 纯错误响应（无读数）：无法定位到具体设备，按插件回写错误，
-                    // 让 UI 显示原因，而不是让数值无声冻结。
-                    _store.RecordPluginError(client.PluginId, code);
-                }
-                else
-                {
-                    foreach (var reading in outcome.Readings)
-                    {
-                        _store.Apply([reading], now);
-                    }
-                }
-
-                if (outcome.ErrorCode is { } errorCode)
-                {
-                    foreach (var reading in outcome.Readings)
-                    {
-                        _store.RecordDeviceError(reading.DeviceId, errorCode);
-                    }
-                }
-
-                RaiseChanged(hasChanges: false);
-                return;
-            }
-
-            var changed = _store.Apply(outcome.Readings, now);
-
-            // 恢复成功后清除上一次的错误标记，避免旧原因一直挂在设备上。
-            if (_store.ClearPluginError(client.PluginId))
-            {
-                changed = true;
-            }
-
-            foreach (var diagnostic in outcome.Diagnostics)
-            {
-                _store.AddDiagnostic($"[{client.PluginId}] {diagnostic}");
-            }
-
-            RaiseChanged(changed);
+            ApplyOutcome(client, outcome);
         }
         finally
         {
             gate.Release();
         }
+    }
+
+    /// <summary>把一次读取结果写入存储并广播变化（被动轮询与主动读取共用）。</summary>
+    private void ApplyOutcome(IPluginClient client, PluginPollOutcome outcome)
+    {
+        var now = _clock.UtcNow;
+
+        if (!outcome.Ok)
+        {
+            _log?.Invoke($"插件 {client.PluginId} 读取失败：{outcome.ErrorCode} {outcome.ErrorMessage}");
+
+            if (outcome.Readings.Count == 0 && outcome.ErrorCode is { } code)
+            {
+                // 纯错误响应（无读数）：无法定位到具体设备，按插件回写错误，
+                // 让 UI 显示原因，而不是让数值无声冻结。
+                _store.RecordPluginError(client.PluginId, code);
+            }
+            else
+            {
+                foreach (var reading in outcome.Readings)
+                {
+                    _store.Apply([reading], now);
+                }
+            }
+
+            if (outcome.ErrorCode is { } errorCode)
+            {
+                foreach (var reading in outcome.Readings)
+                {
+                    _store.RecordDeviceError(reading.DeviceId, errorCode);
+                }
+            }
+
+            RaiseChanged(hasChanges: false);
+            return;
+        }
+
+        var changed = _store.Apply(outcome.Readings, now);
+
+        // 恢复成功后清除上一次的错误标记，避免旧原因一直挂在设备上。
+        if (_store.ClearPluginError(client.PluginId))
+        {
+            changed = true;
+        }
+
+        foreach (var diagnostic in outcome.Diagnostics)
+        {
+            _store.AddDiagnostic($"[{client.PluginId}] {diagnostic}");
+        }
+
+        RaiseChanged(changed);
     }
 
     private async Task ExpiryLoopAsync(CancellationToken token)

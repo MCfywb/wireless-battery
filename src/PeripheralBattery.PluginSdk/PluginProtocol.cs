@@ -25,6 +25,18 @@ public static class PluginMethods
     public const string Poll = "poll";
     public const string Diagnostics = "diagnostics";
     public const string Shutdown = "shutdown";
+
+    /// <summary>
+    /// 按需主动读取。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="Poll"/>（被动：只监听广播）相对：本方法允许插件**主动连接设备**
+    /// 以取得新值。按 D-010，宿主**只在用户显式点击「立即刷新」时**调用它；
+    /// 定时轮询一律走 <see cref="Poll"/>。
+    /// 不支持该方法的插件应返回 <see cref="PluginErrorCodes.UnsupportedRequest"/>，
+    /// 由宿主回退到被动轮询。
+    /// </remarks>
+    public const string ActiveRead = "activeRead";
 }
 
 /// <summary>请求体。</summary>

@@ -56,6 +56,9 @@ public sealed class TrayApplicationContext : ApplicationContext
     /// <summary>菜单当前是否处于展开状态。</summary>
     private bool _menuOpen;
 
+    /// <summary>主动读取是否正在进行；避免重复触发。</summary>
+    private bool _refreshing;
+
     /// <summary>菜单展开期间发生的结构变化，待菜单关闭后补做。</summary>
     private bool _pendingMenuRefresh;
 
@@ -70,7 +73,11 @@ public sealed class TrayApplicationContext : ApplicationContext
         _statusHeader = new ToolStripMenuItem("正在初始化…") { Enabled = false };
         _devicesHeader = new ToolStripMenuItem("设备") { Enabled = false };
         _separator = new ToolStripSeparator();
-        _refreshItem = new ToolStripMenuItem("立即刷新", null, async (_, _) => await RefreshNowAsync());
+        _refreshItem = new ToolStripMenuItem("立即刷新（主动读取）")
+        {
+            ToolTipText = "主动连接设备读取最新电量（需十余秒）；平时为被动监听，不连接设备",
+        };
+        _refreshItem.Click += async (_, _) => await ActiveRefreshAsync();
         _settingsItem = new ToolStripMenuItem("设置…", null, (_, _) => ShowSettings());
         _pluginsItem = new ToolStripMenuItem("插件管理…", null, (_, _) => ShowPluginManager());
         _diagnosticsItem = new ToolStripMenuItem("诊断…", null, (_, _) => ShowDiagnostics());
@@ -149,6 +156,39 @@ public sealed class TrayApplicationContext : ApplicationContext
         _scheduler.Start();
 
         _uiTimer.Start();
+    }
+
+    /// <summary>
+    /// 立即刷新：走**主动**路径（D-010）。
+    /// </summary>
+    /// <remarks>
+    /// 主动读取需要建链、握手与等待上报，耗时可达十余秒，
+    /// 因此期间禁用该菜单项并改写文本，避免用户以为点击没反应。
+    /// 定时轮询始终是被动的，只有这里会主动连接设备。
+    /// </remarks>
+    private async Task ActiveRefreshAsync()
+    {
+        if (_refreshing)
+        {
+            return;
+        }
+
+        _refreshing = true;
+        var originalText = _refreshItem.Text;
+        _refreshItem.Enabled = false;
+        _refreshItem.Text = "正在主动读取…";
+
+        try
+        {
+            await RefreshNowAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            _refreshItem.Text = originalText;
+            _refreshItem.Enabled = true;
+            _refreshing = false;
+            RefreshMenu();
+        }
     }
 
     /// <summary>获取当前插件运行时列表（供插件管理窗口使用）。</summary>

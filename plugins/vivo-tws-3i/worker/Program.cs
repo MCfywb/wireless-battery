@@ -28,6 +28,15 @@ internal static class Program
 
     private const int DiscoverScanMs = 3000;
 
+    /// <summary>
+    /// 主动读取建链后等待上报的窗口（毫秒）。
+    /// </summary>
+    /// <remarks>
+    /// 与被动的 12 秒扫描窗口对齐：注册链完成后设备通常立即上报，
+    /// 这段窗口用于接住它以及期间状态变化的追加推送。
+    /// </remarks>
+    private const int ActiveReadListenMs = 12000;
+
     /// <summary>BLE 扫描器启动后的预热时间（毫秒），用于等无线电就绪。</summary>
     private const int ScannerWarmupMs = 2500;
 
@@ -50,7 +59,7 @@ internal static class Program
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private static int Main()
+    private static async Task<int> Main()
     {
         Console.OutputEncoding = Encoding.UTF8;
 
@@ -81,7 +90,7 @@ internal static class Program
                 }
                 else
                 {
-                    response = Dispatch(request, matcher, scanner);
+                    response = await Dispatch(request, matcher, scanner).ConfigureAwait(false);
                 }
             }
             catch (JsonException ex)
@@ -109,7 +118,7 @@ internal static class Program
         return 0;
     }
 
-    private static PluginResponse Dispatch(PluginRequest request, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
+    private static async Task<PluginResponse> Dispatch(PluginRequest request, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
     {
         if (request.ProtocolVersion != PluginProtocol.ProtocolVersion)
         {
@@ -124,6 +133,9 @@ internal static class Program
 
             case PluginMethods.Poll:
                 return Poll(request.RequestId, matcher, scanner);
+
+            case PluginMethods.ActiveRead:
+                return await ActiveRead(request.RequestId, matcher).ConfigureAwait(false);
 
             case PluginMethods.Diagnostics:
                 return new PluginResponse
@@ -148,6 +160,85 @@ internal static class Program
                     $"不支持的方法：{request.Method}");
         }
     }
+
+    /// <summary>
+    /// 按需主动读取：只在用户**显式点击「立即刷新」**时由宿主调用（D-010）。
+    /// </summary>
+    /// <remarks>
+    /// <para>机理是「连入触发上报」而不是「发查询命令」：<c>0x0207</c> 在本型号上 4 种
+    /// ver/vendor 组合全部无响应，且官方 App 从不发送它。实测可靠的路径是
+    /// <b>连接 + 注册链之后设备立即上报一帧 <c>0x8207</c></b>（§21），期间状态变化还会追加推送。
+    /// 因此这里建链后短监听一段，取最新的电量帧再断开。</para>
+    /// <para>与被动广播路径产出<b>同一个 deviceId</b>（<c>bt:XX:…</c>），保证宿主把两路读数归并到同一台设备。</para>
+    /// <para>充电位暂不解码：GAIA 帧的充电位语义未独立验证，按「不得断言未验证语义」原则留空，
+    /// 仅保留电量三部件。</para>
+    /// </remarks>
+    private static async Task<PluginResponse> ActiveRead(string requestId, VivoTws3iModelMatcher matcher)
+    {
+        var diagnostics = new List<string>();
+        var name = matcher.Profile.BluetoothNamePrefixes.FirstOrDefault() ?? "vivo TWS 3i";
+
+        var result = await GaiaActiveReader
+            .ReadAsync(name, ActiveReadListenMs, CancellationToken.None)
+            .ConfigureAwait(false);
+
+        diagnostics.AddRange(result.Diagnostics);
+
+        if (!result.Ok || result.Battery is null || result.DeviceId is null)
+        {
+            var failed = new PluginResponse
+            {
+                RequestId = requestId,
+                Ok = false,
+                Error = new PluginError
+                {
+                    Code = result.ErrorCode ?? PluginErrorCodes.DeviceNotFound,
+                    Message = result.ErrorMessage ?? "主动读取失败",
+                },
+            };
+            failed.Diagnostics.AddRange(diagnostics);
+            return failed;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        const string source = "GAIA-RFCOMM:0x8207";
+        var displayName = matcher.GetDisplayName(matcher.Profile.ModelIds.FirstOrDefault());
+        var battery = result.Battery;
+
+        return new PluginResponse
+        {
+            RequestId = requestId,
+            Ok = true,
+            Readings =
+            [
+                ActiveReading(result.DeviceId, displayName, "leftEarbud", battery.Left, now, source),
+                ActiveReading(result.DeviceId, displayName, "rightEarbud", battery.Right, now, source),
+                ActiveReading(result.DeviceId, displayName, "chargingCase", battery.Case, now, source),
+            ],
+            Diagnostics = diagnostics,
+        };
+    }
+
+    private static PluginReading ActiveReading(
+        string deviceId,
+        string deviceName,
+        string component,
+        int? percentage,
+        DateTimeOffset now,
+        string source)
+        => new()
+        {
+            DeviceId = deviceId,
+            DeviceName = deviceName,
+            Component = component,
+            Percentage = percentage,
+            Charging = null,
+            Connected = null,
+            Quality = percentage is null
+                ? nameof(ReadingQuality.Unavailable)
+                : nameof(ReadingQuality.Reported),
+            Source = source,
+        };
 
     private static PluginResponse Discover(string requestId, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
     {

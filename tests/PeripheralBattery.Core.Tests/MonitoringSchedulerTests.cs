@@ -7,6 +7,7 @@ namespace PeripheralBattery.Core.Tests;
 internal sealed class FakePluginClient : IPluginClient
 {
     private int _pollCount;
+    private int _activeReadCount;
     private int _currentConcurrency;
     private int _maxConcurrency;
 
@@ -20,10 +21,31 @@ internal sealed class FakePluginClient : IPluginClient
 
     public Func<int, PluginPollOutcome>? Factory { get; set; }
 
+    /// <summary>
+    /// 主动读取的结果工厂；为 null 表示该插件不支持主动读取。
+    /// </summary>
+    public Func<int, PluginPollOutcome>? ActiveFactory { get; set; }
+
     /// <summary>当前并发执行中的 poll 数量峰值。</summary>
     public int MaxConcurrency => Volatile.Read(ref _maxConcurrency);
 
     public int PollCount => Volatile.Read(ref _pollCount);
+
+    public int ActiveReadCount => Volatile.Read(ref _activeReadCount);
+
+    public Task<PluginPollOutcome> ActiveReadAsync(CancellationToken cancellationToken)
+    {
+        var index = Interlocked.Increment(ref _activeReadCount);
+
+        if (ActiveFactory is null)
+        {
+            // 不支持主动读取：宿主应据此回退到被动读取。
+            return Task.FromResult(PluginPollOutcome.Failure(
+                PluginErrorCodes.UnsupportedRequest, "该插件不支持主动读取"));
+        }
+
+        return Task.FromResult(ActiveFactory(index));
+    }
 
     public Task<PluginPollOutcome> PollAsync(CancellationToken cancellationToken)
     {
@@ -193,6 +215,64 @@ public sealed class MonitoringSchedulerTests
         Assert.NotNull(device);
         Assert.Equal(55, device.Get(BatteryComponent.LeftEarbud)!.Percentage);
         Assert.Null(device.LastErrorCode);
+    }
+
+    [Fact]
+    public async Task 立即刷新应走主动读取而非被动轮询()
+    {
+        // D-010：只有用户显式点击才走主动路径；定时轮询始终被动。
+        var client = new FakePluginClient("test-plugin", _ => new PluginPollOutcome(true, [Reading(70)], []))
+        {
+            ActiveFactory = _ => new PluginPollOutcome(true, [Reading(88)], []),
+        };
+
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+        await using var scheduler = new MonitoringScheduler([client], store, TimeSpan.FromHours(1));
+
+        scheduler.Start();
+        await WaitUntilAsync(() => client.PollCount >= 1);
+
+        await scheduler.RefreshNowAsync();
+
+        Assert.Equal(1, client.ActiveReadCount);
+        Assert.Equal(88, store.GetDevice("bt:test")!.Get(BatteryComponent.LeftEarbud)!.Percentage);
+    }
+
+    [Fact]
+    public async Task 插件不支持主动读取时应回退被动读取()
+    {
+        var client = new FakePluginClient("test-plugin", _ => new PluginPollOutcome(true, [Reading(70)], []));
+
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+        await using var scheduler = new MonitoringScheduler([client], store, TimeSpan.FromHours(1));
+
+        scheduler.Start();
+        await WaitUntilAsync(() => client.PollCount >= 1);
+
+        await scheduler.RefreshNowAsync();
+
+        Assert.Equal(1, client.ActiveReadCount);
+        Assert.Equal(2, client.PollCount);
+        Assert.Equal(70, store.GetDevice("bt:test")!.Get(BatteryComponent.LeftEarbud)!.Percentage);
+    }
+
+    [Fact]
+    public async Task 定时轮询不得触发主动读取()
+    {
+        var client = new FakePluginClient("test-plugin", _ => new PluginPollOutcome(true, [Reading(70)], []))
+        {
+            ActiveFactory = _ => new PluginPollOutcome(true, [Reading(88)], []),
+        };
+
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+        await using var scheduler = new MonitoringScheduler([client], store, TimeSpan.FromMilliseconds(50));
+
+        scheduler.Start();
+        await WaitUntilAsync(() => client.PollCount >= 5);
+        await scheduler.StopAsync();
+
+        Assert.Equal(0, client.ActiveReadCount);
+        Assert.Equal(70, store.GetDevice("bt:test")!.Get(BatteryComponent.LeftEarbud)!.Percentage);
     }
 
     private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000)

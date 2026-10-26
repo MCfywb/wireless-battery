@@ -32,8 +32,23 @@ public interface IPluginClient
     /// <summary>插件 id（与 manifest 中的 id 一致）。</summary>
     string PluginId { get; }
 
-    /// <summary>执行一次读取。</summary>
+    /// <summary>
+    /// 执行一次被动读取：只监听，不连接设备。
+    /// </summary>
     /// <param name="cancellationToken">取消令牌。</param>
     /// <returns>轮询结果；实现方不应抛出协议层异常，应转为失败结果。</returns>
     Task<PluginPollOutcome> PollAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// 执行一次按需主动读取（<see cref="PluginSdk.PluginMethods.ActiveRead"/>）。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="PollAsync"/> 的区别：本方法允许插件**主动连接设备**取新值，
+    /// 因此会突破「只读 / 不连接」约束。按 D-010，宿主只在**用户显式点击「立即刷新」**
+    /// 时调用；定时轮询一律走 <see cref="PollAsync"/>。
+    /// 插件不支持时应返回 <see cref="PluginSdk.PluginErrorCodes.UnsupportedRequest"/>，
+    /// 由调用方回退到被动读取。
+    /// </remarks>
+    /// <param name="cancellationToken">取消令牌。</param>
+    Task<PluginPollOutcome> ActiveReadAsync(CancellationToken cancellationToken);
 }

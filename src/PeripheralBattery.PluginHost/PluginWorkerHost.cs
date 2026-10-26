@@ -69,7 +69,25 @@ public sealed class PluginWorkerHost : IPluginClient, IAsyncDisposable
         await _pollGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await PollCoreAsync(cancellationToken).ConfigureAwait(false);
+            return await ReadCoreAsync(
+                PluginMethods.Poll, _options.PollTimeout, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _pollGate.Release();
+        }
+    }
+
+    /// <inheritdoc />
+    public async Task<PluginPollOutcome> ActiveReadAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+
+        await _pollGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await ReadCoreAsync(
+                PluginMethods.ActiveRead, _options.ActiveReadTimeout, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -116,7 +134,10 @@ public sealed class PluginWorkerHost : IPluginClient, IAsyncDisposable
         }
     }
 
-    private async Task<PluginPollOutcome> PollCoreAsync(CancellationToken cancellationToken)
+    private async Task<PluginPollOutcome> ReadCoreAsync(
+        string method,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
         if (Health == PluginHealthState.CircuitOpen)
         {
@@ -134,7 +155,7 @@ public sealed class PluginWorkerHost : IPluginClient, IAsyncDisposable
         try
         {
             response = await _process!.SendAsync(
-                PluginMethods.Poll, null, _options.PollTimeout, cancellationToken).ConfigureAwait(false);
+                method, null, timeout, cancellationToken).ConfigureAwait(false);
         }
         catch (PluginWorkerException ex)
         {
