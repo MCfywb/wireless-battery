@@ -161,16 +161,26 @@ public sealed class MonitoringScheduler : IAsyncDisposable
             if (!outcome.Ok)
             {
                 _log?.Invoke($"插件 {client.PluginId} 读取失败：{outcome.ErrorCode} {outcome.ErrorMessage}");
-                foreach (var reading in outcome.Readings)
-                {
-                    _store.Apply([reading], now);
-                }
 
-                if (outcome.ErrorCode is { } code)
+                if (outcome.Readings.Count == 0 && outcome.ErrorCode is { } code)
+                {
+                    // 纯错误响应（无读数）：无法定位到具体设备，按插件回写错误，
+                    // 让 UI 显示原因，而不是让数值无声冻结。
+                    _store.RecordPluginError(client.PluginId, code);
+                }
+                else
                 {
                     foreach (var reading in outcome.Readings)
                     {
-                        _store.RecordDeviceError(reading.DeviceId, code);
+                        _store.Apply([reading], now);
+                    }
+                }
+
+                if (outcome.ErrorCode is { } errorCode)
+                {
+                    foreach (var reading in outcome.Readings)
+                    {
+                        _store.RecordDeviceError(reading.DeviceId, errorCode);
                     }
                 }
 
@@ -179,6 +189,13 @@ public sealed class MonitoringScheduler : IAsyncDisposable
             }
 
             var changed = _store.Apply(outcome.Readings, now);
+
+            // 恢复成功后清除上一次的错误标记，避免旧原因一直挂在设备上。
+            if (_store.ClearPluginError(client.PluginId))
+            {
+                changed = true;
+            }
+
             foreach (var diagnostic in outcome.Diagnostics)
             {
                 _store.AddDiagnostic($"[{client.PluginId}] {diagnostic}");

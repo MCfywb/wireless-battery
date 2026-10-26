@@ -122,6 +122,56 @@ public sealed class DeviceStateStore
         }
     }
 
+    /// <summary>记录插件级错误：回写到该插件名下的所有设备。</summary>
+    /// <remarks>
+    /// 插件返回纯错误响应（如 <c>DEVICE_NOT_FOUND</c>）时读数为空，
+    /// 无从知道要作用到哪台设备。早期实现此时什么都不做，
+    /// 导致 UI 一直显示冻结的旧数值却不给出任何原因，
+    /// 用户无法区分「程序卡住」与「设备没广播」。
+    /// </remarks>
+    public void RecordPluginError(string pluginId, string errorCode)
+    {
+        lock (_gate)
+        {
+            foreach (var device in _devices.Values)
+            {
+                if (!string.Equals(device.PluginId, pluginId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                device.LastErrorCode = errorCode;
+            }
+        }
+    }
+
+    /// <summary>清除插件名下设备的错误标记（轮询重新成功后调用）。</summary>
+    /// <returns>是否清除了任何标记。</returns>
+    public bool ClearPluginError(string pluginId)
+    {
+        lock (_gate)
+        {
+            var cleared = false;
+            foreach (var device in _devices.Values)
+            {
+                if (!string.Equals(device.PluginId, pluginId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (device.LastErrorCode is null)
+                {
+                    continue;
+                }
+
+                device.LastErrorCode = null;
+                cleared = true;
+            }
+
+            return cleared;
+        }
+    }
+
     /// <summary>记录一条诊断信息（保留最近若干条）。</summary>
     public void AddDiagnostic(string message)
     {

@@ -150,6 +150,51 @@ public sealed class MonitoringSchedulerTests
         Assert.True(client.PollCount > before);
     }
 
+    [Fact]
+    public async Task 插件返回纯错误时必须显示原因而非让数值无声冻结()
+    {
+        // 回归：插件返回 DEVICE_NOT_FOUND 且读数为空时，宿主曾什么都不记录，
+        // UI 一直显示冻结的旧数值却不给出原因，用户无法区分「程序卡住」与「设备没广播」。
+        var client = new FakePluginClient("test-plugin", index => index == 1
+            ? new PluginPollOutcome(true, [Reading(70)], [])
+            : PluginPollOutcome.Failure("DEVICE_NOT_FOUND", "扫描窗口内未收到广播"));
+
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+        await using var scheduler = new MonitoringScheduler([client], store, TimeSpan.FromMilliseconds(50));
+
+        scheduler.Start();
+        await WaitUntilAsync(() => client.PollCount >= 3);
+        await scheduler.StopAsync();
+
+        var device = store.GetDevice("bt:test");
+        Assert.NotNull(device);
+        Assert.Equal(70, device.Get(BatteryComponent.LeftEarbud)!.Percentage);
+        Assert.Equal("DEVICE_NOT_FOUND", device.LastErrorCode);
+    }
+
+    [Fact]
+    public async Task 恢复成功后应清除错误标记()
+    {
+        var client = new FakePluginClient("test-plugin", index => index switch
+        {
+            1 => new PluginPollOutcome(true, [Reading(70)], []),
+            2 => PluginPollOutcome.Failure("DEVICE_NOT_FOUND", "扫描窗口内未收到广播"),
+            _ => new PluginPollOutcome(true, [Reading(55)], []),
+        });
+
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+        await using var scheduler = new MonitoringScheduler([client], store, TimeSpan.FromMilliseconds(50));
+
+        scheduler.Start();
+        await WaitUntilAsync(() => client.PollCount >= 4);
+        await scheduler.StopAsync();
+
+        var device = store.GetDevice("bt:test");
+        Assert.NotNull(device);
+        Assert.Equal(55, device.Get(BatteryComponent.LeftEarbud)!.Percentage);
+        Assert.Null(device.LastErrorCode);
+    }
+
     private static async Task WaitUntilAsync(Func<bool> condition, int timeoutMs = 5000)
     {
         var deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
