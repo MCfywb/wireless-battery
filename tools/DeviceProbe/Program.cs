@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Text;
 using Windows.Devices.Bluetooth;
 using Windows.Devices.Bluetooth.Advertisement;
+using Windows.Devices.Radios;
+using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Foundation;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Bluetooth.Rfcomm;
@@ -38,6 +40,19 @@ if (args.Contains("--rfcomm-probe"))
 if (args.Contains("--rfcomm-matrix"))
 {
     return await ProbeRfcommMatrixAsync(targetName);
+}
+
+// 重连观察：三路并行（BLE 广播扫描 / GATT 订阅 / RFCOMM 监听），蓝牙被关闭再打开后自动恢复。
+if (args.Contains("--reconnect-watch"))
+{
+    var rwSec = 300;
+    var rwIdx = Array.IndexOf(args, "--watch-sec");
+    if (rwIdx >= 0 && rwIdx + 1 < args.Length && int.TryParse(args[rwIdx + 1], out var rwParsed))
+    {
+        rwSec = rwParsed;
+    }
+
+    return await ReconnectWatchAsync(targetName, rwSec);
 }
 
 // T1：BLE 广播监听（纯只读）。目的：① 看 vivo 广播是否直接携带电量；② 观察开盖/合盖/充电引起的广播变化。
@@ -1081,4 +1096,309 @@ static async Task<int> WatchBleAdvertisementsAsync(int ms)
     }
 
     return 0;
+}
+
+// 三路并行观察：蓝牙重启会重建耳机的 GAIA 会话，这是 0x8207 唯一出现的时刻。
+// 三路都在蓝牙恢复后自动重连：广播扫描、GATT notify 订阅、RFCOMM 监听。
+static async Task<int> ReconnectWatchAsync(string targetName, int totalSec)
+{
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(totalSec));
+    var lines = new List<string>();
+    var gate = new object();
+
+    void Log(string msg)
+    {
+        var line = $"{DateTime.Now:HH:mm:ss.fff} {msg}";
+        lock (gate)
+        {
+            lines.Add(line);
+        }
+
+        Console.WriteLine(line);
+    }
+
+    // ---- 路径 1：BLE 广播扫描（只读）----
+    var advTask = Task.Run(async () =>
+    {
+        var seen = new Dictionary<string, int>();
+        while (!cts.IsCancellationRequested)
+        {
+            if (!await RadioIsOnAsync())
+            {
+                Log("[广播] 蓝牙未开启，等待中…");
+                await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+                continue;
+            }
+
+            var watcher = new BluetoothLEAdvertisementWatcher();
+            TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> onAdv = (sender, e) =>
+            {
+                foreach (var md in e.Advertisement.ManufacturerData)
+                {
+                    if (md.CompanyId != 0x0837 && md.CompanyId != 0x8486)
+                    {
+                        continue;
+                    }
+
+                    var raw = new byte[md.Data.Length];
+                    using (var dr = DataReader.FromBuffer(md.Data))
+                    {
+                        dr.ReadBytes(raw);
+                    }
+
+                    var hex = Convert.ToHexString(raw);
+                    lock (seen)
+                    {
+                        seen[hex] = seen.TryGetValue(hex, out var c) ? c + 1 : 1;
+                    }
+                }
+            };
+
+            watcher.Received += onAdv;
+            watcher.Start();
+            Log("[广播] 扫描中");
+
+            while (!cts.IsCancellationRequested && await RadioIsOnAsync())
+            {
+                await Task.Delay(1000, cts.Token).ContinueWith(_ => { });
+            }
+
+            watcher.Stop();
+            watcher.Received -= onAdv;
+            Log(cts.IsCancellationRequested ? "[广播] 观察时段结束，扫描已停" : "[广播] 蓝牙被关闭，扫描已停");
+            await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+        }
+
+        lock (seen)
+        {
+            foreach (var kv in seen)
+            {
+                Log($"[广播] 0x0837 x{kv.Value} {kv.Key}");
+            }
+        }
+    });
+
+    // ---- 路径 2：BLE GATT 订阅 notify（写 CCCD，属写操作，已获用户批准）----
+    var gattTask = Task.Run(async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            try
+            {
+                if (!await RadioIsOnAsync())
+                {
+                    Log("[GATT] 蓝牙未开启，等待中…");
+                    await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                var selector = BluetoothLEDevice.GetDeviceSelectorFromDeviceName(targetName);
+                var infos = await DeviceInformation.FindAllAsync(selector);
+                if (infos.Count == 0)
+                {
+                    Log("[GATT] 未找到 BLE 设备接口");
+                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                var dev = await BluetoothLEDevice.FromIdAsync(infos[0].Id);
+                if (dev is null)
+                {
+                    Log("[GATT] FromIdAsync 返回 null");
+                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                Log($"[GATT] 已连接 BLE，ConnectionStatus={dev.ConnectionStatus}");
+                var services = await dev.GetGattServicesAsync(BluetoothCacheMode.Uncached);
+                Log($"[GATT] 服务数 {services.Services.Count}");
+
+                var subscribed = new List<GattCharacteristic>();
+                foreach (var svc in services.Services)
+                {
+                    GattCharacteristicsResult chr;
+                    try
+                    {
+                        chr = await svc.GetCharacteristicsAsync(BluetoothCacheMode.Uncached);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"[GATT] 服务 {svc.Uuid} 的特征枚举失败: {ex.GetType().Name}");
+                        continue;
+                    }
+
+                    foreach (var ch in chr.Characteristics)
+                    {
+                        var canNotify = ch.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Notify)
+                                        || ch.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Indicate);
+                        if (!canNotify)
+                        {
+                            continue;
+                        }
+
+                        try
+                        {
+                            TypedEventHandler<GattCharacteristic, GattValueChangedEventArgs> onValue = (sender, e) =>
+                            {
+                                var buf = new byte[e.CharacteristicValue.Length];
+                                using (var dr = DataReader.FromBuffer(e.CharacteristicValue))
+                                {
+                                    dr.ReadBytes(buf);
+                                }
+
+                                Log($"[GATT] 通知 {ch.Uuid} = {Convert.ToHexString(buf)}");
+                            };
+
+                            ch.ValueChanged += onValue;
+                            var mode = ch.CharacteristicProperties.HasFlag(GattCharacteristicProperties.Indicate)
+                                ? GattClientCharacteristicConfigurationDescriptorValue.Indicate
+                                : GattClientCharacteristicConfigurationDescriptorValue.Notify;
+                            await ch.WriteClientCharacteristicConfigurationDescriptorAsync(mode);
+                            subscribed.Add(ch);
+                            Log($"[GATT] 已订阅 notify: {ch.Uuid} (props={ch.CharacteristicProperties})");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"[GATT] 订阅 {ch.Uuid} 失败: {ex.GetType().Name}: {ex.Message}");
+                        }
+                    }
+                }
+
+                while (!cts.IsCancellationRequested && await RadioIsOnAsync())
+                {
+                    await Task.Delay(1000, cts.Token).ContinueWith(_ => { });
+                }
+
+                foreach (var ch in subscribed)
+                {
+                    try
+                    {
+                        await ch.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue.None);
+                    }
+                    catch
+                    {
+                        // 断开时忽略
+                    }
+                }
+
+                Log(cts.IsCancellationRequested ? "[GATT] 观察时段结束，断开" : "[GATT] 蓝牙被关闭，断开并准备重试");
+                dev.Dispose();
+                await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+            }
+            catch (Exception ex)
+            {
+                Log($"[GATT] 异常: {ex.GetType().Name}: {ex.Message}");
+                await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+            }
+        }
+    });
+
+    // ---- 路径 3：RFCOMM 监听（等会话重建后的初始推送）----
+    var rfcommTask = Task.Run(async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            try
+            {
+                if (!await RadioIsOnAsync())
+                {
+                    Log("[RFCOMM] 蓝牙未开启，等待中…");
+                    await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+                var infos = await DeviceInformation.FindAllAsync(selector);
+                if (infos.Count == 0)
+                {
+                    Log("[RFCOMM] 未找到经典蓝牙设备");
+                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+                if (dev is null)
+                {
+                    Log("[RFCOMM] FromIdAsync 返回 null");
+                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                var socket = await ConnectPrivateChannelAsync(dev, "00000837-d102-11e1-9b23-00025b00a5a5");
+                if (socket is null)
+                {
+                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    continue;
+                }
+
+                Log("[RFCOMM] 已连接私有通道，开始监听");
+                var writer = new DataWriter(socket.OutputStream);
+
+                // 握手（v4 实测有效）+ 注册通知链
+                await SendAsync(writer, BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>()));
+                Log("[RFCOMM] 已发握手 v4");
+                await Task.Delay(500, cts.Token).ContinueWith(_ => { });
+
+                for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+                {
+                    await SendAsync(writer, BuildFrame(4, 0x001B, cmd, Array.Empty<byte>()));
+                    await Task.Delay(300, cts.Token).ContinueWith(_ => { });
+                }
+
+                Log("[RFCOMM] 已发注册通知链");
+
+                while (!cts.IsCancellationRequested && await RadioIsOnAsync())
+                {
+                    var data = await CollectInteractiveAsync(socket, writer, 1500);
+                    foreach (var fr in ParseFrames(data))
+                    {
+                        var extra = fr.Command == 0x8207 && fr.Payload.Length >= 5
+                            ? $"  ← 电量 左={fr.Payload[1]} 右={fr.Payload[2]} 仓={fr.Payload[3]} 充电位=0x{fr.Payload[4]:X2}"
+                            : fr.Command == 0x8300
+                                ? "  ← 握手响应"
+                                : string.Empty;
+                        Log($"[RFCOMM] 帧 cmd=0x{fr.Command:X4} ver={fr.Version} len={fr.Payload.Length}{extra}");
+                    }
+                }
+
+                writer.DetachStream();
+                socket.Dispose();
+                Log(cts.IsCancellationRequested ? "[RFCOMM] 观察时段结束，断开" : "[RFCOMM] 蓝牙被关闭，断开并准备重试");
+                await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
+            }
+            catch (Exception ex)
+            {
+                Log($"[RFCOMM] 异常: {ex.GetType().Name}: {ex.Message}");
+                await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+            }
+        }
+    });
+
+    Log("=== 三路并行观察已启动：广播扫描 / GATT 订阅 / RFCOMM 监听 ===");
+    Log("请现在关闭再打开电脑蓝牙。");
+    await Task.WhenAll(advTask, gattTask, rfcommTask);
+    Log("=== 观察结束 ===");
+    return 0;
+}
+
+static async Task<bool> RadioIsOnAsync()
+{
+    try
+    {
+        var radios = await Radio.GetRadiosAsync();
+        foreach (var r in radios)
+        {
+            if (r.Kind == RadioKind.Bluetooth)
+            {
+                return r.State == RadioState.On;
+            }
+        }
+
+        // 没有任何蓝牙无线电：视为不可用
+        return false;
+    }
+    catch
+    {
+        return false;
+    }
 }
