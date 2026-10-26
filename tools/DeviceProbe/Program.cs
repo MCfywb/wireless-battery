@@ -37,6 +37,19 @@ if (args.Contains("--rfcomm-matrix"))
     return await ProbeRfcommMatrixAsync(targetName);
 }
 
+// E2：注册通知链（v4 与 v3 各一轮）→ 长监听，观察 0x82xx ACK 与 0x8207。
+if (args.Contains("--rfcomm-register"))
+{
+    var registerListenMs = 30000;
+    var registerIdx = Array.IndexOf(args, "--listen-ms");
+    if (registerIdx >= 0 && registerIdx + 1 < args.Length && int.TryParse(args[registerIdx + 1], out var registerParsed))
+    {
+        registerListenMs = registerParsed;
+    }
+
+    return await ProbeRfcommRegisterAsync(targetName, registerListenMs);
+}
+
 // E5 → E1 → E3：被动交互监听（含 0x8509 应答）→ V3 握手 → V3 电量查询。
 if (args.Contains("--rfcomm-v3"))
 {
@@ -846,6 +859,92 @@ static async Task<int> ProbeRfcommV3Async(string targetName)
     socket.Dispose();
     Console.WriteLine();
     Console.WriteLine("=== E5/E1/E3 完成（只发送了握手、电量查询，以及被动的时间应答） ===");
+    return 0;
+}
+
+
+// E2：注册通知链 → 长监听。
+// 依据：上游 PROTOCOL.md §2「注册通知链 0x0202~0x0206 → 耳机回 0x82xx 后才会开始主动推送电量、佩戴等 report 帧」。
+// 判定信号：注册 ACK（0x8202~0x8206）是否出现；ACK 出现即说明注册被接受，无需等 0x8207。
+static async Task<int> ProbeRfcommRegisterAsync(string targetName, int listenMs)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    var writer = new DataWriter(socket.OutputStream);
+
+    // v4 握手（实测有效，能收到 0x8300）
+    var hs = BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>());
+    Console.WriteLine();
+    Console.WriteLine($"=== 握手 v4 {Convert.ToHexString(hs)} ===");
+    await SendAsync(writer, hs);
+    ReportReceived("握手响应", await CollectInteractiveAsync(socket, writer, 3000));
+
+    // v4 注册链
+    Console.WriteLine();
+    Console.WriteLine("=== 注册通知链 v4：0x0202~0x0206（空载荷，逐条间隔 1.2s）===");
+    for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+    {
+        var frame = BuildFrame(4, 0x001B, cmd, Array.Empty<byte>());
+        Console.WriteLine($"--- 发送 {Convert.ToHexString(frame)} ---");
+        await SendAsync(writer, frame);
+        await Task.Delay(1200);
+    }
+
+    ReportReceived("v4 注册链后的响应", await CollectInteractiveAsync(socket, writer, 5000));
+
+    // v3 注册链
+    Console.WriteLine();
+    Console.WriteLine("=== 注册通知链 v3：0x0202~0x0206 ===");
+    for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+    {
+        var frame = BuildFrame(3, 0x001B, cmd, Array.Empty<byte>());
+        Console.WriteLine($"--- 发送 {Convert.ToHexString(frame)} ---");
+        await SendAsync(writer, frame);
+        await Task.Delay(1200);
+    }
+
+    ReportReceived("v3 注册链后的响应", await CollectInteractiveAsync(socket, writer, 5000));
+
+    // 注册被接受后再查询：验证「查询是否只在注册后才有效」
+    foreach (var ver in new[] { 4, 3 })
+    {
+        var q = BuildFrame(ver, 0x001B, 0x0207, Array.Empty<byte>());
+        Console.WriteLine();
+        Console.WriteLine($"=== 注册后电量查询 v{ver} {Convert.ToHexString(q)} ===");
+        await SendAsync(writer, q);
+        ReportReceived($"注册后查询 v{ver} 的响应", await CollectInteractiveAsync(socket, writer, 5000));
+    }
+
+    // 长监听：看是否开始推送 0x8207
+    Console.WriteLine();
+    Console.WriteLine($"=== 注册后监听 {listenMs} ms：寻找 0x8207 电量帧 ===");
+    ReportReceived("注册后监听", await CollectInteractiveAsync(socket, writer, listenMs));
+
+    writer.DetachStream();
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== E2 完成 ===");
     return 0;
 }
 
