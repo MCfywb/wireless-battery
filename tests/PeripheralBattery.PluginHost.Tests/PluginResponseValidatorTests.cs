@@ -159,6 +159,55 @@ public sealed class PluginResponseValidatorTests
         Assert.Equal("test-plugin:default", result.Readings[0].DeviceId);
     }
 
+    [Fact]
+    public void 同一响应内未标识读数应继承唯一已标识设备()
+    {
+        // 回归：Worker 曾在「本轮没抓到新广播」的过期分支里漏掉 deviceId，
+        // 宿主把同一台设备拆成「真实设备 + {插件 id}:default」两台，托盘显示「共 2 台设备」。
+        var response = Response(
+            new PluginReading
+            {
+                DeviceId = "bt:1C:11:2F:27:89:7A",
+                DeviceName = "vivo TWS 3i",
+                Component = "leftEarbud",
+                Percentage = 99,
+                Quality = "reported",
+            },
+            new PluginReading
+            {
+                Component = "rightEarbud",
+                Percentage = 99,
+                Quality = "stale",
+            });
+
+        var result = Validate(response);
+
+        Assert.True(result.IsValid);
+        Assert.Equal(2, result.Readings.Count);
+        Assert.All(result.Readings, r => Assert.Equal("bt:1C:11:2F:27:89:7A", r.DeviceId));
+
+        // 继承设备标识的同时应继承显示名，否则托盘会显示裸地址。
+        Assert.All(result.Readings, r => Assert.Equal("vivo TWS 3i", r.DeviceName));
+    }
+
+    [Fact]
+    public void 存在多个已标识设备时未标识读数不得随意归并()
+    {
+        var response = Response(
+            new PluginReading { DeviceId = "bt:AA", Component = "leftEarbud", Percentage = 90, Quality = "reported" },
+            new PluginReading { DeviceId = "bt:BB", Component = "leftEarbud", Percentage = 80, Quality = "reported" },
+            new PluginReading { Component = "rightEarbud", Percentage = 70, Quality = "reported" });
+
+        var result = Validate(response);
+
+        Assert.True(result.IsValid);
+
+        // 归属不明确时退回插件内唯一标识：宁可单列，也不猜错设备。
+        Assert.Equal("bt:AA", result.Readings[0].DeviceId);
+        Assert.Equal("bt:BB", result.Readings[1].DeviceId);
+        Assert.Equal("test-plugin:default", result.Readings[2].DeviceId);
+    }
+
     [Theory]
     [InlineData("leftEarbud", BatteryComponent.LeftEarbud)]
     [InlineData("rightEarbud", BatteryComponent.RightEarbud)]

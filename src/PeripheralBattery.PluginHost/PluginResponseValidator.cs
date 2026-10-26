@@ -78,6 +78,29 @@ public static class PluginResponseValidator
         var readings = new List<BatteryReading>(response.Readings.Count);
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
+        // 先解析本次响应里的设备标识（§4.2 按稳定设备 ID 去重）：
+        // - 若响应中存在且仅存在一个已标识设备，未标识的读数继承该 id；
+        //   否则同一次响应里的同一台设备会被拆成「真实设备 + {插件 id}:default」两台幽灵设备。
+        // - 若一个标识都没有（兼容未返回 deviceId 的旧 Worker），退化为插件内唯一设备标识。
+        var identifiedIds = new HashSet<string>(StringComparer.Ordinal);
+        var identifiedNames = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var reading in response.Readings)
+        {
+            if (string.IsNullOrWhiteSpace(reading.DeviceId))
+            {
+                continue;
+            }
+
+            identifiedIds.Add(reading.DeviceId);
+            if (!string.IsNullOrWhiteSpace(reading.DeviceName))
+            {
+                identifiedNames.TryAdd(reading.DeviceId, reading.DeviceName);
+            }
+        }
+
+        string? inheritedDeviceId = identifiedIds.Count == 1 ? identifiedIds.First() : null;
+
         foreach (var reading in response.Readings)
         {
             if (!TryParseComponent(reading.Component, out var component))
@@ -99,11 +122,12 @@ public static class PluginResponseValidator
             var deviceId = reading.DeviceId;
             if (string.IsNullOrWhiteSpace(deviceId))
             {
-                // 兼容未返回 deviceId 的旧 Worker：退化为插件内唯一设备标识。
-                deviceId = $"{pluginId}:default";
+                deviceId = inheritedDeviceId ?? $"{pluginId}:default";
             }
 
-            var deviceName = string.IsNullOrWhiteSpace(reading.DeviceName) ? deviceId : reading.DeviceName;
+            var deviceName = !string.IsNullOrWhiteSpace(reading.DeviceName)
+                ? reading.DeviceName
+                : identifiedNames.GetValueOrDefault(deviceId, deviceId);
 
             // 同设备同部件不得重复，否则归并时无法确定取哪一个。
             var key = $"{deviceId}|{component}";

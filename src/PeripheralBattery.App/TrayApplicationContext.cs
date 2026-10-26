@@ -189,11 +189,18 @@ public sealed class TrayApplicationContext : ApplicationContext
         {
             foreach (var device in devices)
             {
+                // 设备条目必须 Enabled：禁用会使整棵子树无法点击，
+                // 用户看到的是「灰的、不能选中」。子项里的数值仍是只读标签。
                 var deviceItem = new ToolStripMenuItem(device.DeviceName)
                 {
-                    Enabled = false,
+                    Enabled = true,
                     Tag = "device",
                 };
+
+                var detailItem = new ToolStripMenuItem("查看详情…");
+                detailItem.Click += (_, _) => ShowDeviceDetail(device);
+                deviceItem.DropDownItems.Add(detailItem);
+                deviceItem.DropDownItems.Add(new ToolStripSeparator());
 
                 foreach (var component in device.Components.Values.OrderBy(c => c.Component))
                 {
@@ -311,6 +318,29 @@ public sealed class TrayApplicationContext : ApplicationContext
         });
 
         _notifyIcon.ShowBalloonTip(5000, "电量状态", string.Join("\n", lines), ToolTipIcon.Info);
+    }
+
+    /// <summary>弹出单台设备的电量详情气泡。</summary>
+    private void ShowDeviceDetail(DeviceSnapshot device)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var parts = device.Components.Values
+            .OrderBy(c => c.Component)
+            .Select(c => $"{ReadingFormatter.ComponentName(c.Component)} {ReadingFormatter.Format(c, now)}");
+
+        var body = new List<string> { string.Join(" / ", parts) };
+
+        if (device.LastSuccessfulReadUtc is { } last)
+        {
+            body.Add($"最后更新：{ReadingFormatter.FormatAge(now - last)}");
+        }
+
+        if (device.LastErrorCode is { } error)
+        {
+            body.Add($"错误：{error}");
+        }
+
+        _notifyIcon.ShowBalloonTip(5000, device.DeviceName, string.Join("\n", body), ToolTipIcon.Info);
     }
 
     private void ShowSettings()

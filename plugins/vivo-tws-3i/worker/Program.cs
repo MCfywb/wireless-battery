@@ -221,19 +221,13 @@ internal static class Program
             // 广播频率可能极低：若有历史成功读数，按 §4.2 返回 Stale 而非「未找到」。
             if (_lastReadings is not null && _lastSuccessUtc is not null)
             {
+                // 必须保留 DeviceId/DeviceName：宿主按设备标识归并读数，
+                // 标识一旦丢失就会被回退成「{插件 id}:default」，
+                // 在真实设备旁边凭空多出一台幽灵设备（托盘显示「共 2 台设备」）。
                 var stale = new List<PluginReading>(_lastReadings.Count);
                 foreach (var r in _lastReadings)
                 {
-                    stale.Add(new PluginReading
-                    {
-                        Component = r.Component,
-                        Percentage = r.Percentage,
-                        Charging = r.Charging,
-                        Connected = r.Connected,
-                        Quality = nameof(ReadingQuality.Stale),
-                        Source = r.Source,
-                        DiagnosticCode = "NO_FRESH_ADVERTISEMENT_IN_WINDOW",
-                    });
+                    stale.Add(r.MarkStale("NO_FRESH_ADVERTISEMENT_IN_WINDOW"));
                 }
 
                 diagnostics.Add($"stale:lastSuccessUtc={_lastSuccessUtc:O}");

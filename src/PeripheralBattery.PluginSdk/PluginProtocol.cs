@@ -45,7 +45,13 @@ public sealed class PluginRequest
 }
 
 /// <summary>响应中的单个部件读数。</summary>
-public sealed class PluginReading
+/// <remarks>
+/// 用 record 而非 class：降级为过期读数时需要「保留全部字段、只改质量与诊断码」，
+/// <c>with</c> 表达式在结构上保证不丢字段——早期用手工逐字段复制，
+/// 漏掉了 <see cref="DeviceId"/>/<see cref="DeviceName"/>，
+/// 导致宿主把同一台设备拆成「真实设备 + {插件 id}:default」两台幽灵设备。
+/// </remarks>
+public sealed record PluginReading
 {
     /// <summary>
     /// 设备标识。宿主据此把读数归并到具体设备。
@@ -87,6 +93,21 @@ public sealed class PluginReading
     [JsonPropertyName("diagnosticCode")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? DiagnosticCode { get; set; }
+
+    /// <summary>
+    /// 标记为过期读数：保留全部字段（含设备标识与显示名），仅改写质量与诊断码。
+    /// </summary>
+    /// <param name="diagnosticCode">降级原因诊断码。</param>
+    /// <remarks>
+    /// 插件在「本轮扫描窗口内没抓到新广播」时用它生成过期读数。
+    /// 必须保留设备标识：宿主按 deviceId 归并设备，标识丢失会被回退成
+    /// 「{插件 id}:default」，在同一台真实设备旁边多出一台幽灵设备。
+    /// </remarks>
+    public PluginReading MarkStale(string diagnosticCode) => this with
+    {
+        Quality = nameof(ReadingQuality.Stale),
+        DiagnosticCode = diagnosticCode,
+    };
 }
 
 /// <summary>响应体。</summary>
