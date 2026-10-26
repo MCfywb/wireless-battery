@@ -539,5 +539,63 @@
       "mechanism": "运行时向设备查询（高通 SDK DeviceInfo.GAIA_VERSION；App 在 EarbudStatusManager 订阅，失败日志「Not possible to discover API version」），随后用查得的版本通信",
       "implication": "「某型号用 v3 还是 v4」不存在静态答案——这是我们此前 v3/v4 猜测失败的根因，正确流程是先查版本再发命令"
     }
+  },
+  "gaiaChannel": {
+    "_note": "GAIA 私有通道（RFCOMM）。电量优先走 BLE 广播；GAIA 用于交叉验证与补充佩戴状态。",
+    "serviceUuid": "00000837-d102-11e1-9b23-00025b00a5a5",
+    "handshake": {
+      "request": "FF 04 00 00 00 0A 03 00",
+      "requestVersion": 4,
+      "response": "FF 03 00 04 00 0A 83 00 00 03 03 01",
+      "payloadLayout": "[ACK][major][minor][patch]",
+      "gaiaVersion": "3.3.1",
+      "note": "握手必须用 v4；响应体直接携带设备支持的 GAIA 版本，这是官方 App DeviceInfo.GAIA_VERSION 的机制"
+    },
+    "batteryReport": {
+      "command": "0x8207",
+      "trigger": "耳机状态变化时主动推送（取出/佩戴/开合盒盖）；静止不动时不推送",
+      "payloadLayout": "[ACK][左%][右%][仓%][充电位]",
+      "invalidMarker": "0xFF = 该部件未提供，必须记为 null",
+      "observed": {
+        "t=135s": "00 59 50 64 04 → 左89 右80 仓100",
+        "同批次": "00 59 50 FF 04 → 仓未提供"
+      }
+    },
+    "wearStateReport": {
+      "command": "0x820D",
+      "payloadLayout": "[ACK][佩戴位域]",
+      "observedValues": [
+        "02",
+        "04",
+        "06",
+        "0C"
+      ],
+      "note": "位语义尚未确认"
+    },
+    "registerChain": "v4 + vendor 0x001B + 空载荷，0x0202~0x0206；ACK 为 0x8204/0x8205/0x8206；0x0202 的响应 [00][L][R] 是双击手势配置而非 ACK"
+  },
+  "verification": {
+    "status": "hardware-verified",
+    "verifiedAt": "2026-10-26",
+    "model": "vivo TWS 3i (model 132/133)",
+    "firmware": "2.19.7_2.19.7",
+    "gaiaVersion": "3.3.1",
+    "windows": "Windows 10 Home China 26H2 (build 26300.9711)",
+    "officialAppCrossCheck": {
+      "appValues": {
+        "left": 89,
+        "right": 80,
+        "case": 100
+      },
+      "pluginValues": {
+        "left": 89,
+        "right": 80,
+        "case": 100
+      },
+      "agreement": "官方 App、BLE 广播通道、GAIA 0x8207 通道三方逐值一致"
+    },
+    "notVerified": [
+      "同系列长续航版 model 144/145"
+    ]
   }
 }

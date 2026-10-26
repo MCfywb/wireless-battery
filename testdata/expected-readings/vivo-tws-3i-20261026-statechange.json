@@ -1,0 +1,70 @@
+{
+  "_comment": "vivo TWS 3i 在「状态变化」场景下的期望解析结果。字段对齐 docs/development-plan.md §4.1 的 BatteryReading。DeviceId 为脱敏占位符。",
+  "_sourceFrame": "GAIA 0x8207 电量上报帧（设备在状态变化时主动推送）",
+  "_capturedAt": "2026-10-26 12:34",
+  "_reproducible": true,
+  "_reproNote": "握手 v4 → 注册通知链 → 长监听 180 秒；前 130 秒完全静止无 0x8207，用户在 t≈135s 取出/佩戴耳机制造状态变化后立即出现，共捕获 9 帧。触发条件由此确认：耳机状态变化时主动推送。",
+  "_gaiaVersion": "3.3.1（握手响应 0x8300 的 payload = [ACK][major][minor][patch] = 00 03 03 01）",
+
+  "_crossCheck": {
+    "officialApp": "左 89 / 右 80 / 盒 100（用户于同日 12:35 在官方 vivo TWS App 上核对）",
+    "bleAdvertisement": "同一时刻广播 0x0837 载荷 [8]=状态字节、[9]=0x64(100 盒)、[10]=0x50(80 右)、[11]=0x59(89 左)、[12]=0x04",
+    "agreement": "官方 App、0x8207 帧、BLE 广播三条独立来源逐值一致",
+    "conclusion": "满足 docs/development-plan.md §13.4 的 hardware-verified 判据"
+  },
+
+  "readings": [
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "LeftEarbud",
+      "Percentage": 89,
+      "IsCharging": false,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia:0x8207",
+      "DiagnosticCode": null
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "RightEarbud",
+      "Percentage": 80,
+      "IsCharging": false,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia:0x8207",
+      "DiagnosticCode": null
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "ChargingCase",
+      "Percentage": 100,
+      "IsCharging": true,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia:0x8207",
+      "DiagnosticCode": null
+    }
+  ],
+
+  "_edgeCaseCaseBatteryNotReported": {
+    "_note": "同批次另有 6 帧的 payload[3] = 0xFF，表示充电盒电量未提供。解析必须记为 null 且 Quality=Unavailable，不得显示为 0%",
+    "expected": {
+      "Component": "ChargingCase",
+      "Percentage": null,
+      "Quality": "Unavailable",
+      "DiagnosticCode": "COMPONENT_NOT_REPORTED"
+    }
+  },
+
+  "_caveats": [
+    "0x8207 是状态变化触发的主动推送，静止不动时不推送；作为唯一取数来源会导致数值长期不刷新",
+    "充电位 payload[4] = 0x04 表示充电盒在充电（bit2）；左右耳充电位为 bit0/bit1",
+    "同批次捕获到 0x820D（佩戴状态）payload 取值 02 / 04 / 06 / 0C，其位语义尚未确认"
+  ]
+}
