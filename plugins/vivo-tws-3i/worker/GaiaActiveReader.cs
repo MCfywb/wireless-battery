@@ -30,6 +30,14 @@ internal static class GaiaActiveReader
     private const int SdpTimeoutMs = 20000;
     private const int ConnectTimeoutMs = 15000;
     private const int FindTimeoutMs = 10000;
+
+    /// <summary>
+    /// 按地址枚举的专用超时：命中本地缓存时亚秒级返回；
+    /// 设备处于连接态时该查询会挂起（2026-10-27 实测 findByAddress=timeout(10000ms)），
+    /// 4 秒即放弃转名字兜底，不再白等 10 秒。
+    /// </summary>
+    private const int AddressFindTimeoutMs = 4000;
+
     private const int SendTimeoutMs = 5000;
     private const int HandshakeResponseMs = 3000;
     // 对齐参考探针 E2：每条注册命令间隔 1.2s，给设备足够处理时间（避免 ACK 漏收）。
@@ -219,7 +227,7 @@ internal static class GaiaActiveReader
             var byAddr = await WithTimeout(
                 DeviceInformation.FindAllAsync(
                     BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(addr)).AsTask(),
-                FindTimeoutMs, diagnostics, "findByAddress").ConfigureAwait(false);
+                AddressFindTimeoutMs, diagnostics, "findByAddress").ConfigureAwait(false);
 
             diagnostics.Add($"active:byAddressCandidates={byAddr?.Count ?? -1} mac={knownMac}");
             if (byAddr is { Count: > 0 })
