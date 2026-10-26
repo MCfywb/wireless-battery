@@ -16,5 +16,6 @@
     <Project Path="tests/PeripheralBattery.Protocol.Tests/PeripheralBattery.Protocol.Tests.csproj" />
     <Project Path="tests/PeripheralBattery.Core.Tests/PeripheralBattery.Core.Tests.csproj" />
     <Project Path="tests/PeripheralBattery.PluginHost.Tests/PeripheralBattery.PluginHost.Tests.csproj" />
+    <Project Path="tests/PeripheralBattery.App.Tests/PeripheralBattery.App.Tests.csproj" />
   </Folder>
 </Solution>
