@@ -74,6 +74,30 @@ public sealed class VivoTwsGaiaFrameTests
         Assert.Null(battery.Left);
     }
 
+    [Theory]
+    // 2026-10-27 控制变量：未插电 = 0x00；插上充电线 = 0x04（bit2=盒在充电）
+    [InlineData("004C4EFF00", false)]
+    [InlineData("004C4E5204", true)]
+    [InlineData("004C4EFF04", true)]
+    [InlineData("004C4E5200", false)]
+    public void 盒充电位应与实测一致(string payload, bool expected)
+    {
+        var battery = VivoTwsGaiaFrameReader.DecodeBattery(Hex(payload));
+
+        Assert.NotNull(battery);
+        Assert.Equal(expected, battery.CaseCharging);
+    }
+
+    [Fact]
+    public void 左右耳充电位尚未验证不得暴露()
+    {
+        // bit0/bit1 语义未验证（实验中耳机从未进入充电态），故一律为未知。
+        var battery = VivoTwsGaiaFrameReader.DecodeBattery(Hex("004C4E5204"));
+
+        Assert.NotNull(battery);
+        Assert.Null(battery.EarbudsCharging);
+    }
+
     [Fact]
     public void 载荷不足时应返回null()
     {

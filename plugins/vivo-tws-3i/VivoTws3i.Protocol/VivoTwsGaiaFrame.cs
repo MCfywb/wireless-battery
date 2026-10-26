@@ -171,8 +171,33 @@ public static class VivoTwsGaiaFrameReader
     /// <param name="Left">左耳电量；<c>null</c> 表示未知（上报 <c>0xFF</c>）。</param>
     /// <param name="Right">右耳电量；<c>null</c> 表示未知。</param>
     /// <param name="Case">充电盒电量；<c>null</c> 表示未知。</param>
-    /// <param name="ChargeBits">充电状态位；<c>null</c> 表示未提供。</param>
-    public sealed record BatteryReport(int? Left, int? Right, int? Case, int? ChargeBits);
+    /// <param name="ChargeBits">充电状态位原始值；<c>null</c> 表示未提供。</param>
+    public sealed record BatteryReport(int? Left, int? Right, int? Case, int? ChargeBits)
+    {
+        /// <summary>位掩码：盒在充电。</summary>
+        public const int MaskCaseCharging = 0x04;
+
+        /// <summary>
+        /// 盒是否在充电（充电位 bit2）。
+        /// </summary>
+        /// <remarks>
+        /// <b>这是唯一经过验证的充电位</b>：2026-10-27 控制变量实验中，
+        /// 该位与「给充电盒插/拔充电线」同步翻转，且与同一时刻<b>广播路径</b>的
+        /// <c>CaseChg</c> 一致（双通道交叉验证），见 docs/protocols/vivo-tws-3i.md §22。
+        /// </remarks>
+        public bool? CaseCharging => ChargeBits is { } bits ? (bits & MaskCaseCharging) != 0 : null;
+
+        /// <summary>
+        /// 左右耳是否在充电 —— <b>不提供</b>。
+        /// </summary>
+        /// <remarks>
+        /// bit0（左）/ bit1（右）的语义<b>尚未验证</b>：控制变量实验中耳机始终未进入充电态
+        /// （盒盖须保持打开才能维持蓝牙连接，而开盖时本型号的盒不给耳充电），
+        /// 广播与 GAIA 两条通道的左右耳充电位全程均为 0，无从判定。
+        /// 按「不得断言未验证语义」原则，不暴露该字段，调用方应显示未知。
+        /// </remarks>
+        public bool? EarbudsCharging => null;
+    }
 
     /// <summary>
     /// 把 <c>0x8207</c> 帧的载荷解码为三部件电量。

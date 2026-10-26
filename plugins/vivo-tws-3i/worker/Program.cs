@@ -170,8 +170,8 @@ internal static class Program
     /// <b>连接 + 注册链之后设备立即上报一帧 <c>0x8207</c></b>（§21），期间状态变化还会追加推送。
     /// 因此这里建链后短监听一段，取最新的电量帧再断开。</para>
     /// <para>与被动广播路径产出<b>同一个 deviceId</b>（<c>bt:XX:…</c>），保证宿主把两路读数归并到同一台设备。</para>
-    /// <para>充电位暂不解码：GAIA 帧的充电位语义未独立验证，按「不得断言未验证语义」原则留空，
-    /// 仅保留电量三部件。</para>
+    /// <para>充电位只解码**盒**（bit2）：这是唯一经双通道交叉验证过的位（§22）。
+    /// 左右耳充电位（bit0/bit1）语义未验证，一律留未知。</para>
     /// </remarks>
     private static async Task<PluginResponse> ActiveRead(string requestId, VivoTws3iModelMatcher matcher)
     {
@@ -211,9 +211,12 @@ internal static class Program
             Ok = true,
             Readings =
             [
-                ActiveReading(result.DeviceId, displayName, "leftEarbud", battery.Left, now, source),
-                ActiveReading(result.DeviceId, displayName, "rightEarbud", battery.Right, now, source),
-                ActiveReading(result.DeviceId, displayName, "chargingCase", battery.Case, now, source),
+                ActiveReading(result.DeviceId, displayName, "leftEarbud", battery.Left, null, now, source),
+                ActiveReading(result.DeviceId, displayName, "rightEarbud", battery.Right, null, now, source),
+
+                // 只有盒的充电状态是经过验证的；左右耳充电位语义未验证，一律留未知。
+                ActiveReading(result.DeviceId, displayName, "chargingCase", battery.Case,
+                    battery.CaseCharging, now, source),
             ],
             Diagnostics = diagnostics,
         };
@@ -224,6 +227,7 @@ internal static class Program
         string deviceName,
         string component,
         int? percentage,
+        bool? charging,
         DateTimeOffset now,
         string source)
         => new()
@@ -232,7 +236,7 @@ internal static class Program
             DeviceName = deviceName,
             Component = component,
             Percentage = percentage,
-            Charging = null,
+            Charging = charging,
             Connected = null,
             Quality = percentage is null
                 ? nameof(ReadingQuality.Unavailable)
