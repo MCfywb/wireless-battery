@@ -2,13 +2,16 @@
 using System.Diagnostics;
 using System.Text;
 using Windows.Devices.Bluetooth;
+using Windows.Devices.Bluetooth.Advertisement;
+using Windows.Foundation;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Bluetooth.Rfcomm;
 using Windows.Devices.Enumeration;
 using Windows.Networking.Sockets;
 using Windows.Storage.Streams;
 
-var targetName = args.Length > 0 ? args[0] : "vivo TWS 3i";
+// 设备名 = 第一个非选项参数（选项均以 "--" 开头），避免把 --xxx 当成设备名。
+var targetName = args.FirstOrDefault(a => !a.StartsWith("--", StringComparison.Ordinal)) ?? "vivo TWS 3i";
 var readValues = !args.Contains("--no-read");
 
 Console.OutputEncoding = System.Text.Encoding.UTF8;
@@ -35,6 +38,19 @@ if (args.Contains("--rfcomm-probe"))
 if (args.Contains("--rfcomm-matrix"))
 {
     return await ProbeRfcommMatrixAsync(targetName);
+}
+
+// T1：BLE 广播监听（纯只读）。目的：① 看 vivo 广播是否直接携带电量；② 观察开盖/合盖/充电引起的广播变化。
+if (args.Contains("--ble-watch"))
+{
+    var watchMs = 120000;
+    var watchIdx = Array.IndexOf(args, "--listen-ms");
+    if (watchIdx >= 0 && watchIdx + 1 < args.Length && int.TryParse(args[watchIdx + 1], out var watchParsed))
+    {
+        watchMs = watchParsed;
+    }
+
+    return await WatchBleAdvertisementsAsync(watchMs);
 }
 
 // E2：注册通知链（v4 与 v3 各一轮）→ 长监听，观察 0x82xx ACK 与 0x8207。
@@ -438,9 +454,9 @@ static async Task<List<byte>> CollectAsync(StreamSocket socket, int ms)
 // 打印原始字节，并按上游帧格式尝试解析（解析结论标注为「未验证假设」）。
 // GAIA 帧的最小表示，供解析与打印共用。
 // 按 GAIA 帧格式切分字节流。flags 的 0x02 位表示长度域扩为 2 字节——不处理会整体错位。
-static List<GFrame> ParseFrames(List<byte> data)
+static List<(int Version, int Flags, int Vendor, int Command, byte[] Payload)> ParseFrames(List<byte> data)
 {
-    var frames = new List<GFrame>();
+    var frames = new List<(int Version, int Flags, int Vendor, int Command, byte[] Payload)>();
     var i = 0;
     while (i + 4 <= data.Count)
     {
@@ -483,7 +499,7 @@ static List<GFrame> ParseFrames(List<byte> data)
             break;
         }
 
-        frames.Add(new GFrame(ver, flags, vendor, cmd, data.GetRange(start, len).ToArray()));
+        frames.Add((ver, flags, vendor, cmd, data.GetRange(start, len).ToArray()));
         i = start + len;
     }
 
@@ -948,5 +964,121 @@ static async Task<int> ProbeRfcommRegisterAsync(string targetName, int listenMs)
     return 0;
 }
 
-// GAIA 帧的最小表示（类型声明必须放在所有顶级语句/本地函数之后）。
-sealed record GFrame(int Version, int Flags, int Vendor, int Command, byte[] Payload);
+
+// T1：被动监听 BLE 广播。纯只读，不连接任何设备、不写任何数据。
+// 关注：0x0837 / 0x8486 厂商 ID（vivo Fast Pair 标记）、0x180F、以及任意厂商数据段的长度与变化。
+static async Task<int> WatchBleAdvertisementsAsync(int ms)
+{
+    var watcher = new BluetoothLEAdvertisementWatcher();
+
+    var timeline = new List<string>();
+    var counts = new Dictionary<string, int>();
+    var seenPayloads = new Dictionary<string, int>();
+    var interesting = 0;
+
+    TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> onReceived = (sender, e) =>
+    {
+        var ad = e.Advertisement;
+        var sb = new System.Text.StringBuilder();
+        sb.Append(DateTime.Now.ToString("HH:mm:ss.fff"));
+        sb.Append(" type=").Append(e.AdvertisementType);
+
+        var mfg = new List<string>();
+        foreach (var md in ad.ManufacturerData)
+        {
+            var raw = new byte[md.Data.Length];
+            using (var dr = DataReader.FromBuffer(md.Data))
+            {
+                dr.ReadBytes(raw);
+            }
+
+            mfg.Add($"0x{md.CompanyId:X4}:{Convert.ToHexString(raw)}");
+        }
+
+        if (mfg.Count > 0)
+        {
+            sb.Append(" mfg=").Append(string.Join(" | ", mfg));
+        }
+
+        if (ad.ServiceUuids.Count > 0)
+        {
+            sb.Append(" svc=").Append(string.Join(",", ad.ServiceUuids.Select(u => u.ToString())));
+        }
+
+        if (ad.LocalName.Length > 0)
+        {
+            sb.Append(" name=").Append(ad.LocalName);
+        }
+
+        sb.Append(" rssi=").Append(e.RawSignalStrengthInDBm);
+
+        var line = sb.ToString();
+        lock (timeline)
+        {
+            timeline.Add(line);
+            counts[line] = counts.TryGetValue(line, out var c) ? c + 1 : 1;
+            foreach (var m in mfg)
+            {
+                seenPayloads[m] = seenPayloads.TryGetValue(m, out var c2) ? c2 + 1 : 1;
+            }
+
+            if (mfg.Count > 0 || ad.ServiceUuids.Count > 0)
+            {
+                interesting++;
+            }
+        }
+    };
+
+    watcher.Received += onReceived;
+
+    Console.WriteLine($"=== T1 BLE 广播监听 {ms} ms（纯只读）===");
+    Console.WriteLine("提示：需要耳机在广播（开盖或未完全休眠）。");
+    watcher.Start();
+    await Task.Delay(ms);
+    watcher.Stop();
+
+    Console.WriteLine();
+    Console.WriteLine($"收到广播总数: {timeline.Count}   含厂商数据或服务 UUID 的: {interesting}");
+    Console.WriteLine();
+    Console.WriteLine("--- 不同广播内容（按出现次数）---");
+    foreach (var kv in counts.OrderByDescending(k => k.Value).Take(40))
+    {
+        Console.WriteLine($"  x{kv.Value,-5} {kv.Key}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("--- 厂商数据段去重统计（判断是否含电量）---");
+    foreach (var kv in seenPayloads.OrderByDescending(k => k.Value).Take(40))
+    {
+        Console.WriteLine($"  x{kv.Value,-5} {kv.Key}");
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("--- 时间线（内容变化处，压缩连续重复）---");
+    var last = (string?)null;
+    var runStart = 0;
+    for (var i = 0; i < timeline.Count; i++)
+    {
+        var cur = timeline[i].Substring(0, 15) + timeline[i].Substring(timeline[i].IndexOf(" type="));
+        if (last == null)
+        {
+            last = cur;
+            runStart = i;
+            continue;
+        }
+
+        if (cur != last)
+        {
+            Console.WriteLine($"  [{runStart}..{i - 1}] x{i - runStart}  {last}");
+            last = cur;
+            runStart = i;
+        }
+    }
+
+    if (last != null && timeline.Count > 0)
+    {
+        Console.WriteLine($"  [{runStart}..{timeline.Count - 1}] x{timeline.Count - runStart}  {last}");
+    }
+
+    return 0;
+}
