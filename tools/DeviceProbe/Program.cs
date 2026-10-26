@@ -37,6 +37,12 @@ if (args.Contains("--rfcomm-matrix"))
     return await ProbeRfcommMatrixAsync(targetName);
 }
 
+// E5 → E1 → E3：被动交互监听（含 0x8509 应答）→ V3 握手 → V3 电量查询。
+if (args.Contains("--rfcomm-v3"))
+{
+    return await ProbeRfcommV3Async(targetName);
+}
+
 // 纯监听：连接后不发送任何命令，只观察设备是否自发上报（判断埋点是主动推送还是查询触发）。
 if (args.Contains("--rfcomm-listen"))
 {
@@ -417,17 +423,13 @@ static async Task<List<byte>> CollectAsync(StreamSocket socket, int ms)
 }
 
 // 打印原始字节，并按上游帧格式尝试解析（解析结论标注为「未验证假设」）。
-static void ReportReceived(string label, List<byte> data)
+// GAIA 帧的最小表示，供解析与打印共用。
+// 按 GAIA 帧格式切分字节流。flags 的 0x02 位表示长度域扩为 2 字节——不处理会整体错位。
+static List<GFrame> ParseFrames(List<byte> data)
 {
-    Console.WriteLine($"[{label}] 收到 {data.Count} 字节" + (data.Count > 0 ? $": {Convert.ToHexString(data.ToArray())}" : "（无响应）"));
-    if (data.Count == 0)
-    {
-        Console.WriteLine("  提示：无响应 ≠ 该型号不支持，可能是版本/vendor 用错、通道退化或需先注册通知链。");
-        return;
-    }
-
+    var frames = new List<GFrame>();
     var i = 0;
-    while (i + 8 <= data.Count)
+    while (i + 4 <= data.Count)
     {
         if (data[i] != 0xFF)
         {
@@ -437,76 +439,142 @@ static void ReportReceived(string label, List<byte> data)
 
         var ver = data[i + 1];
         var flags = data[i + 2];
-
-        // flags 位含义（上游协议记录）：0x01 = 末尾附 1 字节异或校验；0x02 = 长度域扩为 2 字节。
-        // 不处理会整体错位，把 0x8224 误读成 vendor=0x1B82 之类的假命令。
         int len;
-        int vendorIndex;
+        int vIdx;
         if ((flags & 0x02) != 0)
         {
+            if (i + 5 > data.Count)
+            {
+                break;
+            }
+
             len = (data[i + 3] << 8) | data[i + 4];
-            vendorIndex = i + 5;
+            vIdx = i + 5;
         }
         else
         {
             len = data[i + 3];
-            vendorIndex = i + 4;
+            vIdx = i + 4;
         }
 
-        if (vendorIndex + 4 > data.Count)
+        if (vIdx + 4 > data.Count)
         {
-            Console.WriteLine("  [截断帧] 头部不完整");
             break;
         }
 
-        var vendor = (data[vendorIndex] << 8) | data[vendorIndex + 1];
-        var cmd = (data[vendorIndex + 2] << 8) | data[vendorIndex + 3];
-        var payloadStart = vendorIndex + 4;
-
-        if (payloadStart + len > data.Count)
+        var vendor = (data[vIdx] << 8) | data[vIdx + 1];
+        var cmd = (data[vIdx + 2] << 8) | data[vIdx + 3];
+        var start = vIdx + 4;
+        if (start + len > data.Count)
         {
-            Console.WriteLine($"  [截断帧] cmd=0x{cmd:X4} 声明 payload {len} 字节，实到 {data.Count - payloadStart} 字节");
             break;
         }
 
-        var payload = data.GetRange(payloadStart, len).ToArray();
-        Console.WriteLine($"  [帧] ver={ver} flags=0x{flags:X2} len={len} vendor=0x{vendor:X4} cmd=0x{cmd:X4}");
+        frames.Add(new GFrame(ver, flags, vendor, cmd, data.GetRange(start, len).ToArray()));
+        i = start + len;
+    }
 
-        if (cmd == 0x8300)
+    return frames;
+}
+
+// 构造 GAIA 帧（与上游 frame() 对齐）。
+static byte[] BuildFrame(int version, int vendor, int command, byte[] payload, int flags = 0)
+{
+    var extended = (flags & 0x02) != 0;
+    var headerSize = extended ? 5 : 4;
+    var buf = new byte[headerSize + 4 + payload.Length];
+    buf[0] = 0xFF;
+    buf[1] = (byte)version;
+    buf[2] = (byte)flags;
+    if (extended)
+    {
+        buf[3] = (byte)((payload.Length >> 8) & 0xFF);
+        buf[4] = (byte)(payload.Length & 0xFF);
+    }
+    else
+    {
+        buf[3] = (byte)payload.Length;
+    }
+
+    var v = headerSize;
+    buf[v] = (byte)((vendor >> 8) & 0xFF);
+    buf[v + 1] = (byte)(vendor & 0xFF);
+    buf[v + 2] = (byte)((command >> 8) & 0xFF);
+    buf[v + 3] = (byte)(command & 0xFF);
+    Array.Copy(payload, 0, buf, v + 4, payload.Length);
+    return buf;
+}
+
+// 应答耳机的 0x8509 时间请求：0x0509，payload 7 字节纯二进制（非 BCD），完整年份 = 世纪*100 + 年。
+// 上游 probe 注明「必须应答，否则它可能不继续交互」。
+static byte[] BuildTimeResponse()
+{
+    var now = DateTime.Now;
+    var payload = new byte[]
+    {
+        (byte)((now.Year / 100) & 0xFF),
+        (byte)(now.Year % 100),
+        (byte)now.Month,
+        (byte)now.Day,
+        (byte)now.Hour,
+        (byte)now.Minute,
+        (byte)now.Second,
+    };
+    return BuildFrame(3, 0x001B, 0x0509, payload);
+}
+
+static void ReportReceived(string label, List<byte> data)
+{
+    Console.WriteLine($"[{label}] 收到 {data.Count} 字节" + (data.Count > 0 ? $": {Convert.ToHexString(data.ToArray())}" : "（无响应）"));
+    if (data.Count == 0)
+    {
+        Console.WriteLine("  提示：0x8207 是耳机主动推送的 report，不是查询的响应；空窗口只说明这段时间内没推送，不等于不支持。");
+        return;
+    }
+
+    foreach (var fr in ParseFrames(data))
+    {
+        Console.WriteLine($"  [帧] ver={fr.Version} flags=0x{fr.Flags:X2} len={fr.Payload.Length} vendor=0x{fr.Vendor:X4} cmd=0x{fr.Command:X4}");
+
+        if (fr.Command == 0x8300)
         {
-            Console.WriteLine($"       → 握手响应 0x8300，payload={Convert.ToHexString(payload)}");
+            Console.WriteLine($"       → 握手响应 0x8300，payload={Convert.ToHexString(fr.Payload)}");
         }
-        else if (cmd == 0x8207 && payload.Length >= 5)
+        else if (fr.Command == 0x8207 && fr.Payload.Length >= 5)
         {
-            Console.WriteLine($"       → 电量 0x8207【按上游假设解析，本型号未验证】左={payload[1]} 右={payload[2]} 仓={payload[3]} 充电位=0x{payload[4]:X2}");
+            Console.WriteLine($"       → 电量 0x8207【按上游假设解析，本型号未验证】左={fr.Payload[1]} 右={fr.Payload[2]} 仓={fr.Payload[3]} 充电位=0x{fr.Payload[4]:X2}");
             Console.WriteLine("         位含义（假设）：bit0=左充电 bit1=右充电 bit2=仓充电；数值 >100 或 0xFF = 该部件未知/无效，不得显示为 0");
         }
-        else if (cmd == 0x8224)
+        else if (fr.Command == 0x8509)
         {
-            ReportTelemetry(payload);
+            Console.WriteLine($"       → 耳机索要时间 0x8509，payload={Convert.ToHexString(fr.Payload)}（已自动应答）");
+        }
+        else if (fr.Command == 0x8224)
+        {
+            ReportTelemetry(fr.Payload);
         }
         else
         {
-            Console.WriteLine($"       payload={Convert.ToHexString(payload)}");
+            Console.WriteLine($"       payload={Convert.ToHexString(fr.Payload)}");
         }
-
-        i = payloadStart + len;
     }
 }
 
 // 埋点上报 0x8224：payload 是 JSON，其中的 C 字段按上游记录为左右耳电量，可用于交叉验证 0x8207。
 static void ReportTelemetry(byte[] payload)
 {
-    if (payload.Length == 0 || payload[0] != (byte)'{')
+    // 埋点 payload 带 1~2 字节前导（如 00 01），JSON 从第一个 '{' 开始。
+    var jsonStart = Array.IndexOf(payload, (byte)'{');
+    if (jsonStart < 0)
     {
         Console.WriteLine($"       埋点 0x8224 payload={Convert.ToHexString(payload)}");
         return;
     }
 
-    var json = Encoding.UTF8.GetString(payload);
-    var preview = json.Length > 300 ? json.Substring(0, 300) + "…" : json;
+    var json = Encoding.UTF8.GetString(payload, jsonStart, payload.Length - jsonStart);
+    var preview = json.Length > 260 ? json.Substring(0, 260) + "…" : json;
     Console.WriteLine($"       → 埋点 0x8224 JSON: {preview}");
-    Console.WriteLine($"         提取【按上游记录，尚未与官方 App 交叉验证】C(左右耳电量)={ExtractJson(json, "C")}  B={ExtractJson(json, "B")}  P={ExtractJson(json, "P")}  V(固件)={ExtractJson(json, "V")}");
+    Console.WriteLine($"         提取【按上游记录，未与官方 App 交叉验证】C(左右耳电量)={ExtractJson(json, "C")}  B={ExtractJson(json, "B")}  P={ExtractJson(json, "P")}  V(固件)={ExtractJson(json, "V")}");
 }
 
 static string ExtractJson(string json, string key)
@@ -670,3 +738,116 @@ static async Task<int> ProbeRfcommServicesAsync(string targetName)
     Console.WriteLine("=== SDP 查询结束（未连接 socket、未发送任何数据） ===");
     return 0;
 }
+
+// 交互式收集：持续读取给定时间窗；遇到耳机的 0x8509 时间请求立即应答（上游 probe 要求）。
+static async Task<List<byte>> CollectInteractiveAsync(StreamSocket socket, DataWriter writer, int ms)
+{
+    var all = new List<byte>();
+    var reader = new DataReader(socket.InputStream) { InputStreamOptions = InputStreamOptions.Partial };
+    var sw = Stopwatch.StartNew();
+    var respondedUpTo = 0;
+
+    while (sw.ElapsedMilliseconds < ms)
+    {
+        var remaining = (int)Math.Max(1, ms - sw.ElapsedMilliseconds);
+
+        // 不取消 LoadAsync：取消会连带释放 socket 流。
+        var loadTask = reader.LoadAsync(256).AsTask();
+        var completed = await Task.WhenAny(loadTask, Task.Delay(remaining));
+        if (completed != loadTask)
+        {
+            break;
+        }
+
+        uint n;
+        try
+        {
+            n = await loadTask;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[接收异常] {ex.GetType().Name}: {ex.Message}");
+            break;
+        }
+
+        if (n == 0)
+        {
+            break;
+        }
+
+        var buf = new byte[n];
+        reader.ReadBytes(buf);
+        all.AddRange(buf);
+
+        // 只对本次新增的帧做应答判定，避免重复应答同一帧。
+        var frames = ParseFrames(all);
+        for (var k = respondedUpTo; k < frames.Count; k++)
+        {
+            var fr = frames[k];
+            if (fr.Vendor == 0x001B && fr.Command == 0x8509)
+            {
+                var reply = BuildTimeResponse();
+                Console.WriteLine($"[自动应答] 收到 0x8509 时间请求 → 发送 0x0509 {Convert.ToHexString(reply)}");
+                await SendAsync(writer, reply);
+            }
+        }
+
+        respondedUpTo = frames.Count;
+    }
+
+    return all;
+}
+
+// E5 → E1 → E3：先被动交互监听，再 V3 握手，再 V3 电量查询。
+static async Task<int> ProbeRfcommV3Async(string targetName)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    var writer = new DataWriter(socket.OutputStream);
+
+    Console.WriteLine();
+    Console.WriteLine("=== E5：不发送任何命令，交互监听 15 秒（遇 0x8509 自动应答） ===");
+    ReportReceived("E5 被动监听", await CollectInteractiveAsync(socket, writer, 15000));
+
+    var hs = BuildFrame(3, 0x000A, 0x0300, Array.Empty<byte>());
+    Console.WriteLine();
+    Console.WriteLine($"=== E1：V3 握手 {Convert.ToHexString(hs)} ===");
+    await SendAsync(writer, hs);
+    ReportReceived("E1 握手响应", await CollectInteractiveAsync(socket, writer, 6000));
+
+    var q = BuildFrame(3, 0x001B, 0x0207, Array.Empty<byte>());
+    Console.WriteLine();
+    Console.WriteLine($"=== E3：V3 电量查询 {Convert.ToHexString(q)} ===");
+    await SendAsync(writer, q);
+    ReportReceived("E3 电量响应", await CollectInteractiveAsync(socket, writer, 10000));
+
+    writer.DetachStream();
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== E5/E1/E3 完成（只发送了握手、电量查询，以及被动的时间应答） ===");
+    return 0;
+}
+
+// GAIA 帧的最小表示（类型声明必须放在所有顶级语句/本地函数之后）。
+sealed record GFrame(int Version, int Flags, int Vendor, int Command, byte[] Payload);

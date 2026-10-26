@@ -1,0 +1,58 @@
+{
+  "_comment": "vivo TWS 3i 在充电状态下的期望解析结果。字段对齐 docs/development-plan.md §4.1 的 BatteryReading。DeviceId 为脱敏占位符。",
+  "_sourceFrame": "0x8224 埋点上报（被动收到，未发送任何命令）",
+  "_capturedAt": "2026-10-26",
+  "_reproducible": true,
+  "_reproNote": "连续两次独立运行的 15 秒被动监听均收到埋点（第一次 1 帧 C=98_97，第二次 8 帧 C=98_96）。对比同日较早的 0x8207 样本（左95/右91）可见数值随充电上升，符合物理预期。",
+  "_crossCheck": {
+    "channel": "0x8207 电量帧（同日较早、未充电时）",
+    "value": "左 95 / 右 91",
+    "agreement": "两条独立通道量级一致；充电后埋点给出 98/96，趋势正确"
+  },
+
+  "readings": [
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "LeftEarbud",
+      "Percentage": 98,
+      "IsCharging": null,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia:telemetry-0x8224",
+      "DiagnosticCode": "SOURCE_IS_TELEMETRY_NOT_BATTERY_REPORT"
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "RightEarbud",
+      "Percentage": 96,
+      "IsCharging": null,
+      "IsConnected": true,
+      "Quality": "Reported",
+      "Source": "RFCOMM:vivo-gaia:telemetry-0x8224",
+      "DiagnosticCode": "SOURCE_IS_TELEMETRY_NOT_BATTERY_REPORT"
+    },
+    {
+      "DeviceId": "sanitized:vivo-tws-3i",
+      "DeviceName": "vivo TWS 3i",
+      "PluginId": "vivo-tws-3i",
+      "Component": "ChargingCase",
+      "Percentage": null,
+      "IsCharging": null,
+      "IsConnected": true,
+      "Quality": "Unavailable",
+      "Source": "RFCOMM:vivo-gaia:telemetry-0x8224",
+      "DiagnosticCode": "NO_CASE_VALUE_IN_SAMPLE"
+    }
+  ],
+
+  "_caveats": [
+    "C 字段语义来自上游协议记录，尚未与官方 App 交叉验证；未交叉验证前不得标为 hardware-verified",
+    "埋点是遥测数据，不是 0x8207 电量上报帧；UI 若展示须标明来源",
+    "B 字段（值 1_1）语义未确认，不能当作充电盒百分比",
+    "充电盒电量至今未在任何通道取得有效值，只能显示未知"
+  ]
+}
