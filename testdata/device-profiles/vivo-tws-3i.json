@@ -2,18 +2,41 @@
   "_comment": "vivo TWS 3i 型号识别依据，提取自官方 vivo TWS App 安装包内的 assets/tws_config.json（只读分析，仅取事实性字段）。用于插件的型号匹配规则，替代按设备名匹配的不可靠做法。",
   "_extractedAt": "2026-10-26",
   "_source": "官方 App assets/tws_config.json",
-
   "matchRules": [
-    { "kind": "modelId", "values": [132, 133], "note": "Fast Pair 广播厂商数据段 [15] 字节；V2 格式下 0xFF 时取 [18:20] 小端扩展 id" },
-    { "kind": "projectName", "values": ["DPD2407A"] },
-    { "kind": "deviceType", "values": [11] },
-    { "kind": "queryCommand", "command": "0x021B", "note": "查询型号后比对，作为第二路校验" }
+    {
+      "kind": "modelId",
+      "values": [
+        132,
+        133
+      ],
+      "note": "Fast Pair 广播厂商数据段 [15] 字节；V2 格式下 0xFF 时取 [18:20] 小端扩展 id"
+    },
+    {
+      "kind": "projectName",
+      "values": [
+        "DPD2407A"
+      ]
+    },
+    {
+      "kind": "deviceType",
+      "values": [
+        11
+      ]
+    },
+    {
+      "kind": "queryCommand",
+      "command": "0x021B",
+      "note": "查询型号后比对，作为第二路校验"
+    }
   ],
-
   "variants": [
-    { "model": 144, "name": "vivo TWS 3i 长续航", "projectName": "DPD2407AC", "note": "同属 3i 系列，需独立验证，不得假定与 132/133 完全一致" }
+    {
+      "model": 144,
+      "name": "vivo TWS 3i 长续航",
+      "projectName": "DPD2407AC",
+      "note": "同属 3i 系列，需独立验证，不得假定与 132/133 完全一致"
+    }
   ],
-
   "capabilities": {
     "noise_reduction": 0,
     "touch_operation": 2,
@@ -26,7 +49,6 @@
     "temperature": 0,
     "_note": "0 表示不支持。本型号不支持降噪，上游 TWS 3e 的降噪命令不可套用"
   },
-
   "protocolStack": {
     "gaiaVersion": 3,
     "evidence": [
@@ -37,14 +59,20 @@
     ],
     "_note": "上游 query_battery() 硬编码 version=4，且上游型号表无 TWS 3i（会回退到 v4 默认 profile）——这是查询静默无响应的根因"
   },
-
   "upstreamReference": {
     "repo": "https://github.com/Zhaoyi-ya/TWS-Pods-PC",
     "license": "GPL-3.0（仅阅读协议事实，未复制代码）",
     "profiles": {
-      "FAMILY_DEFAULT_V4": { "gaiaVersion": 4, "note": "上游 18 个型号中仅 2 个有专属 profile，其余全落此默认" },
-      "AIR3_PRO_CAPTURED": { "gaiaVersion": 3 },
-      "TWS_3E_V3": { "gaiaVersion": 3 }
+      "FAMILY_DEFAULT_V4": {
+        "gaiaVersion": 4,
+        "note": "上游 18 个型号中仅 2 个有专属 profile，其余全落此默认"
+      },
+      "AIR3_PRO_CAPTURED": {
+        "gaiaVersion": 3
+      },
+      "TWS_3E_V3": {
+        "gaiaVersion": 3
+      }
     },
     "knownGaps": [
       "型号表无 TWS 3i → select_profile 回退 v4 → 电量查询版本错配",
@@ -58,7 +86,6 @@
     },
     "gattRawFrame": "去掉 GAIA 头 4 字节（FF/ver/flags/len），只发 vendor(2)+cmd(2)+payload；写特征必须 writeWithoutResponse"
   },
-
   "gaiaFrame": {
     "format": "FF [ver] [flags] [len] [vendor_hi] [vendor_lo] [cmd_hi] [cmd_lo] [payload...]",
     "flags": {
@@ -67,20 +94,35 @@
     },
     "_source": "官方 App com.vivo.conn.protocol.gaia.rfcomm.Flag 枚举（仅此两个成员）",
     "errorStatusV3": [
-      "AUTHENTICATING", "NOT_AUTHENTICATED", "INCORRECT_STATE", "COMMAND_NOT_SUPPORTED",
-      "FEATURE_NOT_SUPPORTED", "FEATURE_SPECIFIC", "INVALID_PARAMETER",
-      "INSUFFICIENT_RESOURCES", "IN_PROGRESS"
+      "AUTHENTICATING",
+      "NOT_AUTHENTICATED",
+      "INCORRECT_STATE",
+      "COMMAND_NOT_SUPPORTED",
+      "FEATURE_NOT_SUPPORTED",
+      "FEATURE_SPECIFIC",
+      "INVALID_PARAMETER",
+      "INSUFFICIENT_RESOURCES",
+      "IN_PROGRESS"
     ],
     "_errorNote": "GAIA V3 存在认证与状态机语义：握手成功但后续命令静默无响应，可能是会话未认证或状态不对"
   },
-
   "bleChannels": {
     "_note": "官方 App assets/bleQuickBond.json 的扫描过滤条件：manufacturerID 2103(=0x0837) 与 uuid_filter 0x0837 —— 0x0837 既是 Fast Pair 厂商标记，也是 vivo TWS 的 BLE 服务 UUID",
     "officialScanFilters": [
-      { "manufacturerID": "2103", "manufacturerDataArg": "08" },
-      { "manufacturerID": "2103", "manufacturerDataArg": "09" },
-      { "uuid_filter": "00008486-0000-1000-8000-00805f9b34fb" },
-      { "uuid_filter": "00000837-0000-1000-8000-00805f9b34fb" }
+      {
+        "manufacturerID": "2103",
+        "manufacturerDataArg": "08"
+      },
+      {
+        "manufacturerID": "2103",
+        "manufacturerDataArg": "09"
+      },
+      {
+        "uuid_filter": "00008486-0000-1000-8000-00805f9b34fb"
+      },
+      {
+        "uuid_filter": "00000837-0000-1000-8000-00805f9b34fb"
+      }
     ],
     "candidates": [
       {
@@ -99,22 +141,71 @@
       }
     ]
   },
-
   "bleAdvertisement": {
     "_note": "字段语义由官方 App 源码确认（TwsParserV1 + TwsFastPairDeviceBean + n2/e.java），非推测。Windows 的 ManufacturerData 已剥离 CompanyId，下表偏移以此为基准；完整 AD 为 21 字节（含 2 字节 CompanyId）。",
     "companyId": "0x0837",
     "adLength": 21,
     "layout": [
-      { "offset": 0, "size": 1, "field": "bleType", "note": "固定 0x08" },
-      { "offset": 1, "size": 1, "field": "version", "note": "V1 = 0x01" },
-      { "offset": 2, "size": 6, "field": "mac" },
-      { "offset": 8, "size": 1, "field": "stateByte", "note": "两个字段共用：低 3 位 = 在盒状态，高 2 位 = mPairState 连接状态" },
-      { "offset": 9, "size": 1, "field": "baseBatteryPercent", "note": "充电盒电量" },
-      { "offset": 10, "size": 1, "field": "rightBatteryPercent" },
-      { "offset": 11, "size": 1, "field": "leftBatteryPercent" },
-      { "offset": 12, "size": 1, "field": "chargeState", "bits": { "0": "左耳充电中", "1": "右耳充电中", "2": "充电盒充电中" } },
-      { "offset": 13, "size": 1, "field": "modelId" },
-      { "offset": 14, "size": 4, "field": "unknown_4bytes", "note": "语义未确认，非电量" }
+      {
+        "offset": 0,
+        "size": 1,
+        "field": "bleType",
+        "note": "固定 0x08"
+      },
+      {
+        "offset": 1,
+        "size": 1,
+        "field": "version",
+        "note": "V1 = 0x01"
+      },
+      {
+        "offset": 2,
+        "size": 6,
+        "field": "mac"
+      },
+      {
+        "offset": 8,
+        "size": 1,
+        "field": "stateByte",
+        "note": "两个字段共用：低 3 位 = 在盒状态，高 2 位 = mPairState 连接状态"
+      },
+      {
+        "offset": 9,
+        "size": 1,
+        "field": "baseBatteryPercent",
+        "note": "充电盒电量"
+      },
+      {
+        "offset": 10,
+        "size": 1,
+        "field": "rightBatteryPercent"
+      },
+      {
+        "offset": 11,
+        "size": 1,
+        "field": "leftBatteryPercent"
+      },
+      {
+        "offset": 12,
+        "size": 1,
+        "field": "chargeState",
+        "bits": {
+          "0": "左耳充电中",
+          "1": "右耳充电中",
+          "2": "充电盒充电中"
+        }
+      },
+      {
+        "offset": 13,
+        "size": 1,
+        "field": "modelId"
+      },
+      {
+        "offset": 14,
+        "size": 4,
+        "field": "unknown_4bytes",
+        "note": "语义未确认，非电量"
+      }
     ],
     "stateByteBits": {
       "0": "左耳在盒",
@@ -131,21 +222,51 @@
       "appBehaviour": "官方 App 的扫描回调不检查连接状态，连接中的设备同样按广播取电量"
     }
   },
-
   "registerChain": {
     "_note": "GAIA 通知注册链。广播取电路径完全不需要它（广播是耳机主动发，无订阅概念）；仅当需要耳机主动推送 report 时才用。",
     "prerequisite": "先完成握手：v4 / vendor 0x000A / cmd 0x0300 / 空载荷 → 耳机回 0x8300",
     "commands": [
-      { "cmd": "0x0202", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8202", "caution": "与「双击手势查询」复用同一命令字；响应 payload [00][左码][右码] 是手势配置而非注册 ACK" },
-      { "cmd": "0x0203", "vendor": "0x001B", "version": 4, "payload": "空", "response": "本机未收到 ACK", "caution": "与「佩戴检测查询」复用同一命令字" },
-      { "cmd": "0x0204", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8204 [00][00]" },
-      { "cmd": "0x0205", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8205 [00][01]（注册单条通知的 ACK）" },
-      { "cmd": "0x0206", "vendor": "0x001B", "version": 4, "payload": "空", "response": "0x8206 [00][03]" }
+      {
+        "cmd": "0x0202",
+        "vendor": "0x001B",
+        "version": 4,
+        "payload": "空",
+        "response": "0x8202",
+        "caution": "与「双击手势查询」复用同一命令字；响应 payload [00][左码][右码] 是手势配置而非注册 ACK"
+      },
+      {
+        "cmd": "0x0203",
+        "vendor": "0x001B",
+        "version": 4,
+        "payload": "空",
+        "response": "本机未收到 ACK",
+        "caution": "与「佩戴检测查询」复用同一命令字"
+      },
+      {
+        "cmd": "0x0204",
+        "vendor": "0x001B",
+        "version": 4,
+        "payload": "空",
+        "response": "0x8204 [00][00]"
+      },
+      {
+        "cmd": "0x0205",
+        "vendor": "0x001B",
+        "version": 4,
+        "payload": "空",
+        "response": "0x8205 [00][01]（注册单条通知的 ACK）"
+      },
+      {
+        "cmd": "0x0206",
+        "vendor": "0x001B",
+        "version": 4,
+        "payload": "空",
+        "response": "0x8206 [00][03]"
+      }
     ],
     "verifiedOnDevice": "2026-10-26：v4 与 v3 两轮均收到 0x8204/0x8205/0x8206 → 注册被接受；但注册后仍无 0x8207",
     "upstreamSource": "vivo_protocol.py REGISTER_CHAIN（注释标注 [实测]）"
   },
-
   "dualConnection": {
     "_note": "本型号支持双连接（tws_config.json: dual_connection=1）。耳机开盖即自动连接手机与 PC。",
     "officialModule": "com.vivo.tws.dualconnection.*（14 个类）+ com.vivo.tws.bean.DualConnectionData",
@@ -156,7 +277,6 @@
     "affectsGaiaChannel": true,
     "gaiaNote": "双连接下 GAIA 会话可能只有一条，另一侧只能走 A2DP/AVRCP——这正是 PC 侧注册链后仍收不到部分 report 的可能原因之一"
   },
-
   "chargingBits": {
     "NO_EARBUD_IN_BASE": 0,
     "LEFT_EARBUD_IN_BASE": 1,
@@ -164,5 +284,176 @@
     "LEFT_RIGHT_EARBUDS_IN_BASE": 3,
     "_source": "官方 App 静态常量；LEFT_EARBUD_CHARGE=1 / RIGHT_EARBUD_CHARGE=2 同值",
     "_note": "与上游记录一致，但仍需对本型号做控制变量验证"
+  },
+  "fastPairAdvertisementFormats": {
+    "_note": "官方 App 的 6 个广播解析器（com.android.vivo.tws.fastpair.parse.parser.*）。本型号用 TWS_PARSER_V1；其余为同家族其他品类/代际的格式，扩展支持其他型号时可直接复用。偏移均相对 Windows 剥离 CompanyId 后的 payload 起点。",
+    "dispatchRule": "manager/d.java ParserMaker：payload[0]==8 → TWS 类（[1]==1 → V1，[1]==2 → V2 或 Advertise）；payload[0]==9 → 单耳/运动耳机类（[1]==1 → WirelessSportV1，[1]==2 → SingleV2）；[4]==3 → ParserV0",
+    "formats": [
+      {
+        "parser": "TwsParserV1",
+        "resultClass": "n2.e",
+        "appliesTo": "vivo TWS 3i（本型号）",
+        "payloadLength": 18,
+        "modelId": "单字节 [13]；无 0xFF 扩展",
+        "fields": {
+          "8": "状态字节：低3位在盒(左/右/基座闭合)、高2位 mPairState 连接状态",
+          "9": "充电盒电量",
+          "10": "右耳电量",
+          "11": "左耳电量",
+          "12": "充电状态(左/右/盒)",
+          "13": "model id",
+          "14-17": "未知 4 字节"
+        },
+        "extra": "manufacturerSpecificData(2103)[1] = accountNum；其后每 6 字节一个已连接设备 MAC"
+      },
+      {
+        "parser": "TwsParserV2",
+        "resultClass": "n2.d",
+        "appliesTo": "TWS V2 代际",
+        "payloadLength": 21,
+        "modelId": "[17]；若为 0xFF 则取 [18],[19] 小端 16 位扩展",
+        "fields": {
+          "12": "状态字节",
+          "13": "充电盒电量",
+          "14": "右耳电量",
+          "15": "左耳电量",
+          "16": "充电状态",
+          "17-19": "model id",
+          "18-21": "掩码 4 字节"
+        },
+        "extra": "掩码 [19] bit7_6/bit5_4/bit3_0 → 三组位域；[37] 之后是 UTF-8 设备名"
+      },
+      {
+        "parser": "TwsParserAdvertise",
+        "resultClass": "n2.d",
+        "appliesTo": "TWS V2 的扩展广播（扫描响应）",
+        "payloadLength": 44,
+        "modelId": "同 V2，含 0xFF 扩展",
+        "fields": {
+          "12": "状态字节",
+          "13-16": "盒/右/左/充电状态",
+          "17-19": "model id",
+          "20-23": "掩码 4 字节"
+        },
+        "extra": "整段偏移比 V2 大 8 字节：manufacturer data 在 +26，设备名在 +44"
+      },
+      {
+        "parser": "SingleParserV2",
+        "resultClass": "n2.e",
+        "appliesTo": "单耳机（非 TWS 对）V2",
+        "payloadLength": 17,
+        "modelId": "单字节 [16]",
+        "fields": {
+          "12": "状态字节",
+          "13": "左耳电量",
+          "14": "充电盒电量",
+          "15": "充电状态",
+          "16": "model id"
+        },
+        "extra": "无右耳字段；manufacturer data 走 type==9 的 bloom 格式"
+      },
+      {
+        "parser": "WirelessSportParserV1",
+        "resultClass": "n2.e",
+        "appliesTo": "运动耳机（单耳）V1",
+        "payloadLength": 16,
+        "modelId": "单字节 [14]",
+        "fields": {
+          "12": "状态字节",
+          "13": "左耳电量",
+          "14": "model id",
+          "15-18": "未知 4 字节"
+        },
+        "extra": "只有左耳电量，无盒、无充电状态"
+      },
+      {
+        "parser": "ParserV0",
+        "resultClass": "n2.a",
+        "appliesTo": "最早的 Fast Pair 格式",
+        "payloadLength": 21,
+        "modelId": "单字节 [20]",
+        "fields": {
+          "10": "另一设备地址起始(6 字节)",
+          "11": "在盒状态",
+          "12": "盒电量",
+          "13": "右耳电量",
+          "14": "左耳电量",
+          "15": "充电状态",
+          "16-17": "16 位小端字段 A",
+          "18-19": "16 位小端字段 B",
+          "20": "model id"
+        },
+        "extra": "another address 由字节直接拼成 MAC 字符串；比 V1 多两个 16 位字段"
+      }
+    ]
+  },
+  "gaiaUsage": {
+    "_note": "GAIA 路线在官方 App 里的用途。电量不在其中——App 的电量来自 BLE 广播 + 0x0224 埋点。",
+    "writeOperations": "41 个设置功能域（见 gaiaFeatureDomains）",
+    "readOnlyBeyondAdvertisement": [
+      {
+        "cmd": "0x0215",
+        "meaning": "序列号",
+        "field": "serial_number"
+      },
+      {
+        "cmd": "0x020D",
+        "meaning": "佩戴状态"
+      },
+      {
+        "cmd": "0x0130",
+        "meaning": "降噪模式与档位"
+      },
+      {
+        "cmd": "0x0224",
+        "meaning": "usage 埋点上报（响应含 ear_elec_left/right）"
+      },
+      {
+        "cmd": "0x011D",
+        "meaning": "设备信息（响应对应 ear_edition / ear_box_edition / leftsoft / rightsoft 等）"
+      }
+    ],
+    "firmwareUpgrade": "QTI GAIA feature 注册机制（dd.a.G(QTILFeature.BASIC, 7, {featureId=6})）",
+    "notUsedOnThisModel": "0x0207(519) 电量查询仅出现在响应路由中，用于兼容其他型号；App 自己不主动发送",
+    "gaiaFeatureDomains": [
+      "ANC 状态",
+      "降噪模式",
+      "防风噪状态",
+      "通透/聆听模式",
+      "单耳 ANC 开关",
+      "环境光音效",
+      "自定义音效",
+      "人声音效",
+      "怪兽音效",
+      "音效预览",
+      "空间音频",
+      "空间音频算法",
+      "快捷触控",
+      "双击启动",
+      "长按设置",
+      "快捷语音切换",
+      "音量调节",
+      "音量自适应",
+      "左右耳自适应",
+      "听力提示音",
+      "听力提醒",
+      "听力保护开关",
+      "听力查询结果",
+      "佩戴检测 Fit Test",
+      "耳部监测",
+      "跌落提醒",
+      "跌落提醒通知",
+      "盒内异物提醒",
+      "盒内异物提醒开关",
+      "AOV 语音",
+      "自动播放",
+      "音频播放状态",
+      "麦克风",
+      "游戏低延迟",
+      "自我语音识别",
+      "对话识别",
+      "Hi-Res 编解码配置/索引/当前",
+      "扫码"
+    ]
   }
 }
