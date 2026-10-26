@@ -1298,6 +1298,7 @@ static async Task<int> ReconnectWatchAsync(string targetName, int totalSec)
     {
         while (!cts.IsCancellationRequested)
         {
+            StreamSocket? socket = null;
             try
             {
                 if (!await RadioIsOnAsync())
@@ -1324,10 +1325,10 @@ static async Task<int> ReconnectWatchAsync(string targetName, int totalSec)
                     continue;
                 }
 
-                var socket = await ConnectPrivateChannelAsync(dev, "00000837-d102-11e1-9b23-00025b00a5a5");
+                socket = await ConnectPrivateChannelAsync(dev, "00000837-d102-11e1-9b23-00025b00a5a5");
                 if (socket is null)
                 {
-                    await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                    await Task.Delay(3000, cts.Token).ContinueWith(_ => { });
                     continue;
                 }
 
@@ -1361,15 +1362,34 @@ static async Task<int> ReconnectWatchAsync(string targetName, int totalSec)
                     }
                 }
 
-                writer.DetachStream();
-                socket.Dispose();
+                try
+                {
+                    writer.DetachStream();
+                }
+                catch
+                {
+                    // 忽略
+                }
+
                 Log(cts.IsCancellationRequested ? "[RFCOMM] 观察时段结束，断开" : "[RFCOMM] 蓝牙被关闭，断开并准备重试");
                 await Task.Delay(1500, cts.Token).ContinueWith(_ => { });
             }
             catch (Exception ex)
             {
                 Log($"[RFCOMM] 异常: {ex.GetType().Name}: {ex.Message}");
-                await Task.Delay(2000, cts.Token).ContinueWith(_ => { });
+                await Task.Delay(3000, cts.Token).ContinueWith(_ => { });
+            }
+            finally
+            {
+                // 必须释放，否则下次 connect 会 WSAEADDRINUSE（套接字地址已占用）
+                try
+                {
+                    socket?.Dispose();
+                }
+                catch
+                {
+                    // 已断开时忽略
+                }
             }
         }
     });
