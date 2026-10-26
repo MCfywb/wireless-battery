@@ -30,7 +30,8 @@ internal static class GaiaActiveReader
     private const int SdpTimeoutMs = 20000;
     private const int ConnectTimeoutMs = 15000;
     private const int HandshakeResponseMs = 3000;
-    private const int RegisterGapMs = 500;
+    // 对齐参考探针 E2：每条注册命令间隔 1.2s，给设备足够处理时间（避免 ACK 漏收）。
+    private const int RegisterGapMs = 1200;
 
     /// <summary>主动读取结果。</summary>
     /// <param name="Ok">是否取得电量帧。</param>
@@ -81,7 +82,7 @@ internal static class GaiaActiveReader
             var writer = new DataWriter(socket.OutputStream);
             using var reader = new SocketReader(socket.InputStream);
 
-            var deviceId = "bt:" + NormalizeHost(socket.Information.RemoteAddress.CanonicalName);
+            var deviceId = VivoTwsDeviceId.FromAddress(socket.Information.RemoteAddress.CanonicalName);
             diagnostics.Add($"active:deviceId={deviceId}");
 
             // 1) 握手
@@ -133,30 +134,42 @@ internal static class GaiaActiveReader
                     continue;
                 }
 
+                // 原始字节快照（前 48 字节），用于离线核对帧结构是否如预期。
+                var headBytes = chunk.Length <= 48 ? chunk : chunk.Take(48).ToArray();
+                diagnostics.Add(
+                    $"active:chunk={(chunk.Length > 48 ? "…" : "")}{Convert.ToHexString(headBytes)}");
+
                 buffer.AddRange(chunk);
-                var frames = VivoTwsGaiaFrameReader.Parse(buffer.ToArray());
-                if (frames.Count == 0)
+                var frames = new List<VivoTwsGaiaFrame>();
+                var consumed = VivoTwsGaiaFrameReader.ParseAndConsume(buffer.ToArray(), frames);
+                if (consumed > 0)
                 {
-                    continue;
+                    // 只移除到最后一个完整帧结束处，半帧留在缓冲等待续传。
+                    buffer.RemoveRange(0, consumed);
                 }
 
                 foreach (var frame in frames)
                 {
+                    // 逐帧打印 cmd / vendor / payload 原始字节，便于核对 0x8207 是否被正确解析。
+                    diagnostics.Add(
+                        $"active:frame cmd=0x{frame.Command:X4} vendor=0x{frame.Vendor:X4} " +
+                        $"payload={Convert.ToHexString(frame.Payload)}");
+
                     if (frame.Command != VivoTwsGaiaFrameReader.CommandBatteryReport)
                     {
                         continue;
                     }
 
-                    battery = VivoTwsGaiaFrameReader.DecodeBattery(frame.Payload);
                     reportCount++;
-                }
 
-                // 已消费的帧从缓冲中移除，保留可能的半帧等待续传。
-                var consumed = frames.Sum(f => VivoTwsGaiaFrameReader.Build(
-                    f.Version, f.Vendor, f.Command, f.Payload, f.Flags).Length);
-                if (consumed > 0 && consumed <= buffer.Count)
-                {
-                    buffer.RemoveRange(0, consumed);
+                    var decoded = VivoTwsGaiaFrameReader.DecodeBattery(frame.Payload);
+
+                    // 只保留**可解码**的最后一帧：短帧不可覆盖已解出的值，
+                    // 否则会「收到 4 帧却报没有电量」。
+                    if (decoded is not null)
+                    {
+                        battery = decoded;
+                    }
                 }
             }
 

@@ -111,7 +111,31 @@ public static class VivoTwsGaiaFrameReader
     public static List<VivoTwsGaiaFrame> Parse(ReadOnlySpan<byte> data)
     {
         var frames = new List<VivoTwsGaiaFrame>();
+        ParseCore(data, frames);
+        return frames;
+    }
+
+    /// <summary>
+    /// 解析并返回**实际消费的字节数**（含被跳过的同步垃圾字节）。
+    /// </summary>
+    /// <param name="data">缓冲区。</param>
+    /// <param name="frames">解析出的完整帧；方法内部会清空后再填充。</param>
+    /// <returns>可从缓冲中移除的字节数。</returns>
+    /// <remarks>
+    /// 调用方据此裁剪接收缓冲。若改用「各帧重建长度之和」，
+    /// 一旦缓冲前部存在非 <c>0xFF</c> 的垃圾字节就会算错，
+    /// 导致缓冲错位、后续帧被误解析（曾造成重复计数与解码失败）。
+    /// </remarks>
+    public static int ParseAndConsume(ReadOnlySpan<byte> data, List<VivoTwsGaiaFrame> frames)
+    {
+        frames.Clear();
+        return ParseCore(data, frames);
+    }
+
+    private static int ParseCore(ReadOnlySpan<byte> data, List<VivoTwsGaiaFrame> frames)
+    {
         var i = 0;
+        var lastFrameEnd = 0;
 
         while (i + 4 <= data.Length)
         {
@@ -160,9 +184,11 @@ public static class VivoTwsGaiaFrameReader
                 version, flags, vendor, command, data.Slice(start, length).ToArray()));
 
             i = start + length;
+            lastFrameEnd = i;
         }
 
-        return frames;
+        // 末尾的半帧必须留在缓冲中等待续传，因此只消费到最后一个完整帧结束处。
+        return lastFrameEnd;
     }
 
     /// <summary>

@@ -140,4 +140,47 @@ public sealed class VivoTwsGaiaFrameTests
         Assert.Equal(VivoTwsGaiaFrameReader.CommandBatteryReport, single.Command);
         Assert.Equal(payload, single.Payload);
     }
+
+    [Fact]
+    public void 缓冲前的非0xFF垃圾字节必须计入消费偏移()
+    {
+        // 复现旧 bug：旧实现用「各帧重建长度之和」裁剪接收缓冲，
+        // 会漏掉开头的垃圾字节，使后续帧错位 → 误解析成短 payload → 解码失败。
+        // 本例：1 字节垃圾 + 13 字节电量帧 + 9 字节 ACK 帧。
+        var buffer = Hex("00" + "FF030005001B8207002822FF00" + "FF030001001B82040000");
+        var frames = new List<VivoTwsGaiaFrame>();
+
+        var consumed = VivoTwsGaiaFrameReader.ParseAndConsume(buffer, frames);
+
+        // 必须消费完所有完整字节（1 + 13 + 9 = 23），否则下一轮会把电量帧尾部
+        // 当成新帧起点重新解析，得到短 payload → DecodeBattery 返回 null。
+        Assert.Equal(23, consumed);
+        Assert.Equal(2, frames.Count);
+        Assert.Equal(VivoTwsGaiaFrameReader.CommandBatteryReport, frames[0].Command);
+        Assert.Equal(0x8204, frames[1].Command);
+    }
+
+    [Fact]
+    public void 跨读续传时半帧应保留在缓冲中()
+    {
+        // 模拟：第一轮读到 [垃圾][完整帧][半帧]，第二轮补齐半帧。
+        var read1 = Hex("00" + "FF030005001B8207002822FF00" + "FF030001001B8204");
+        var frames1 = new List<VivoTwsGaiaFrame>();
+        var consumed1 = VivoTwsGaiaFrameReader.ParseAndConsume(read1, frames1);
+
+        // 消费到完整电量帧结束（1 垃圾 + 13 帧 = 14），半帧留在缓冲。
+        Assert.Equal(14, consumed1);
+        Assert.Single(frames1);
+        Assert.Equal(VivoTwsGaiaFrameReader.CommandBatteryReport, frames1[0].Command);
+
+        var remaining = read1.Skip(consumed1).ToArray();   // = [FF 03 00 01 00 1B 82 04]
+        var read2 = Hex("00");                              // 补齐半帧的 1 字节 payload
+        var combined = remaining.Concat(read2).ToArray();
+        var frames2 = new List<VivoTwsGaiaFrame>();
+        VivoTwsGaiaFrameReader.ParseAndConsume(combined, frames2);
+
+        var ack = Assert.Single(frames2);
+        Assert.Equal(0x8204, ack.Command);
+        Assert.Equal("00", Convert.ToHexString(ack.Payload));
+    }
 }
