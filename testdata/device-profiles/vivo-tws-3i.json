@@ -455,5 +455,89 @@
       "Hi-Res 编解码配置/索引/当前",
       "扫码"
     ]
+  },
+  "parserSelection": {
+    "_note": "官方 App 里**不存在**「型号 → 解析器」的映射表。解析器由广播内容决定（manager/d.java ParserMaker），型号只是广播里的一个字段。以下为可用于推断的约束与实测方法。",
+    "dispatchIsContentDriven": true,
+    "dispatchRule": {
+      "b12": "payload[0]（manufacturer data 首字节）：8 = TWS 对类，9 = 单耳/运动耳机类",
+      "b10": "payload[1]：广播格式版本，1 = V1，2 = V2",
+      "z10": "bytes[i10+38] == 0xFF：扩展广播标记，置位则 payload[1]==2 走 Advertise 而非 V2",
+      "table": [
+        {
+          "condition": "b12==8 && b10==1",
+          "parser": "TwsParserV1"
+        },
+        {
+          "condition": "b12==8 && b10==2 && z10",
+          "parser": "TwsParserAdvertise"
+        },
+        {
+          "condition": "b12==8 && b10==2",
+          "parser": "TwsParserV2"
+        },
+        {
+          "condition": "b12==9 && b10==1",
+          "parser": "WirelessSportParserV1"
+        },
+        {
+          "condition": "b12==9 && b10==2",
+          "parser": "SingleParserV2"
+        },
+        {
+          "condition": "b11==3（AD 非 manufacturer data）",
+          "parser": "ParserV0"
+        },
+        {
+          "condition": "其他",
+          "parser": "INVALID"
+        }
+      ]
+    },
+    "inferenceConstraints": [
+      {
+        "rule": "device_type == 2 → payload[0] 必为 9",
+        "reason": "单耳/运动耳机品类使用 type==9 的 manufacturer data",
+        "models": [
+          "vivo Wireless Sport (20)",
+          "vivo Wireless Audio (24)",
+          "iQOO Wireless Sport (36)",
+          "vivo Wireless Sport 2 (52,53)",
+          "iQOO Wireless Active (56)"
+        ],
+        "parsers": "WirelessSportParserV1 或 SingleParserV2（由 payload[1] 定）"
+      },
+      {
+        "rule": "model id > 255 → 必须 V2 或 Advertise",
+        "reason": "V1 的 model id 只有单字节（payload[13]），装不下 >255 的 id；V2 支持 0xFF → [18][19] 小端 16 位扩展",
+        "models": [
+          "vivo TWS 5 Pro (256,257)",
+          "vivo Headphones (260,261)",
+          "iQOO Headphones (264)",
+          "vivo Buds Clip (272,273,274,276,277,278)"
+        ]
+      },
+      {
+        "rule": "其余型号 → payload[0] 为 8，V1 还是 V2 需实测",
+        "reason": "App 不按型号判别，V1/V2 由固件广播内容决定",
+        "deviceTypes": [
+          1,
+          3,
+          4,
+          5,
+          11,
+          12
+        ],
+        "verified": {
+          "vivo TWS 3i (132,133)": "TwsParserV1（payload[0]=0x08, payload[1]=0x01）"
+        }
+      }
+    ],
+    "deterministicMethod": "抓目标设备广播，读 payload[0] 与 payload[1] 两个字节即可确定解析器；无需依赖型号表。",
+    "gaiaProtocolVersion": {
+      "hardcodedByModel": false,
+      "mechanism": "运行时向设备查询（高通 SDK DeviceInfo.GAIA_VERSION；App 在 EarbudStatusManager 订阅，失败日志「Not possible to discover API version」），随后用查得的版本通信",
+      "implication": "「某型号用 v3 还是 v4」不存在静态答案——这是我们此前 v3/v4 猜测失败的根因，正确流程是先查版本再发命令"
+    }
   }
 }
