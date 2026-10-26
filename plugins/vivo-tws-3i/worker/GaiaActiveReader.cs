@@ -163,10 +163,13 @@ internal static class GaiaActiveReader
             diagnostics.Add($"active:batteryFrames={reportCount}");
 
             return battery is null
+                // 已连入并完成握手，只是设备在窗口内没推送——不能用「未找到设备」掩盖，
+                // 否则用户会误以为耳机离线。0x8207 仅在状态变化时上报（§21/§22）。
                 ? new GaiaActiveReadResult(
                     false, deviceId, null, diagnostics,
-                    PluginErrorCodes.DeviceNotFound,
-                    "主动通道连入后未收到电量上报帧")
+                    PluginErrorCodes.NoFreshReport,
+                    $"已连入设备但未收到电量上报（{listenMs / 1000} 秒内耳机状态未变化则不推送）；"
+                    + "可取出 / 放回耳机制造一次状态变化后再试")
                 : new GaiaActiveReadResult(true, deviceId, battery, diagnostics);
         }
         catch (OperationCanceledException)

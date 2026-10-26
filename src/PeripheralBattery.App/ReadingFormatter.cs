@@ -63,7 +63,31 @@ public static class ReadingFormatter
         return text;
     }
 
-    /// <summary>把时长格式化为「12 分钟前」这类相对时间。</summary>
+    /// <summary>
+    /// 把插件错误码翻译成用户能看懂的说明。
+    /// </summary>
+    /// <remarks>
+    /// 必须准确区分「设备不在线」与「已连上但没新数据」——
+    /// 后者若显示成「找不到设备」会让用户误以为耳机离线。
+    /// </remarks>
+    /// <param name="errorCode">错误码。</param>
+    /// <returns>中文说明；未知错误码原样返回。</returns>
+    public static string DescribeErrorCode(string? errorCode) => errorCode switch
+    {
+        PluginSdk.PluginErrorCodes.NoFreshReport =>
+            "已连上设备，但本次未收到新读数（耳机状态未变化时不推送）",
+        PluginSdk.PluginErrorCodes.DeviceNotFound =>
+            "扫描窗口内未收到设备广播",
+        PluginSdk.PluginErrorCodes.DeviceNotConnected =>
+            "设备未连接，无法建立读取通道",
+        PluginSdk.PluginErrorCodes.UnsupportedRequest =>
+            "该插件不支持此操作",
+        PluginSdk.PluginErrorCodes.ProtocolMismatch =>
+            "插件协议版本不匹配",
+        PluginSdk.PluginErrorCodes.InternalError =>
+            "插件内部错误",
+        _ => errorCode ?? "未知错误",
+    };
     public static string FormatAge(TimeSpan age)
     {
         if (age < TimeSpan.Zero)

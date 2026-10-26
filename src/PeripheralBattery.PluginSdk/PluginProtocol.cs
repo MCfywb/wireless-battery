@@ -163,4 +163,14 @@ public static class PluginErrorCodes
     public const string UnsupportedRequest = "UNSUPPORTED_REQUEST";
     public const string ProtocolMismatch = "PROTOCOL_MISMATCH";
     public const string InternalError = "INTERNAL_ERROR";
+
+    /// <summary>
+    /// 已连通设备，但本次未收到新的读数上报。
+    /// </summary>
+    /// <remarks>
+    /// 与 <see cref="DeviceNotFound"/> 的区别：本码表示<b>设备已找到且已连通</b>，
+    /// 只是设备在该窗口内没有推送（如 vivo TWS 3i 的 <c>0x8207</c> 只在状态变化时上报）。
+    /// 不得用「未找到设备」掩盖这种情况，否则会误导用户以为设备离线。
+    /// </remarks>
+    public const string NoFreshReport = "NO_FRESH_REPORT";
 }

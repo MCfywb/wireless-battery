@@ -32,10 +32,13 @@ internal static class Program
     /// 主动读取建链后等待上报的窗口（毫秒）。
     /// </summary>
     /// <remarks>
-    /// 与被动的 12 秒扫描窗口对齐：注册链完成后设备通常立即上报，
-    /// 这段窗口用于接住它以及期间状态变化的追加推送。
+    /// <para><c>0x8207</c> <b>只在耳机状态变化时推送</b>，静止时永不推送（§21）。
+    /// 实测首帧到达时间差异极大：一次在注册后立即到达，另一次等了 <b>84 秒</b>
+    /// （由用户操作耳机触发）——因此窗口再长也无法保证拿到新值，只能提高命中概率。</para>
+    /// <para>取 20 秒的预算理由：SDP 最长 20s + 建链 15s + 握手 3s + 注册链约 2.5s + 监听 20s
+    /// ≈ 60s，仍低于宿主的 <c>ActiveReadTimeout = 90s</c>。</para>
     /// </remarks>
-    private const int ActiveReadListenMs = 12000;
+    private const int ActiveReadListenMs = 20000;
 
     /// <summary>BLE 扫描器启动后的预热时间（毫秒），用于等无线电就绪。</summary>
     private const int ScannerWarmupMs = 2500;

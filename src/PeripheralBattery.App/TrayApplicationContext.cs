@@ -408,7 +408,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (device.LastErrorCode is { } error)
         {
-            entry.Error = new ToolStripMenuItem($"错误：{error}")
+            entry.Error = new ToolStripMenuItem($"错误：{ReadingFormatter.DescribeErrorCode(error)}")
             {
                 Enabled = false,
                 Tag = "info",
@@ -437,7 +437,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (entry.Error is not null && device.LastErrorCode is { } error)
         {
-            entry.Error.Text = $"错误：{error}";
+            entry.Error.Text = $"错误：{ReadingFormatter.DescribeErrorCode(error)}";
         }
     }
 
@@ -552,7 +552,7 @@ public sealed class TrayApplicationContext : ApplicationContext
 
         if (device.LastErrorCode is { } error)
         {
-            body.Add($"错误：{error}");
+            body.Add($"错误：{ReadingFormatter.DescribeErrorCode(error)}");
         }
 
         _notifyIcon.ShowBalloonTip(5000, device.DeviceName, string.Join("\n", body), ToolTipIcon.Info);
