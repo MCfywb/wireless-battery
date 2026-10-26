@@ -6,7 +6,6 @@ using Windows.Devices.Bluetooth.Advertisement;
 using Windows.Devices.Radios;
 using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Foundation;
-using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Devices.Bluetooth.Rfcomm;
 using Windows.Devices.Enumeration;
 using Windows.Networking.Sockets;
@@ -66,6 +65,32 @@ if (args.Contains("--ble-watch"))
     }
 
     return await WatchBleAdvertisementsAsync(watchMs);
+}
+
+// E8：握手 → 注册链 → 长时间监听并打心跳，供用户配合制造状态变化（找 0x8207）。
+if (args.Contains("--rfcomm-hunt"))
+{
+    var huntMs = 120000;
+    var huntIdx = Array.IndexOf(args, "--listen-ms");
+    if (huntIdx >= 0 && huntIdx + 1 < args.Length && int.TryParse(args[huntIdx + 1], out var huntParsed))
+    {
+        huntMs = huntParsed;
+    }
+
+    return await ProbeRfcommHuntAsync(targetName, huntMs);
+}
+
+// E6/E7：先查 GAIA 版本（0x0100）→ 用查得的版本发 0x0207 → 注册链 → 长监听等 0x8207。
+if (args.Contains("--rfcomm-version"))
+{
+    var versionListenMs = 45000;
+    var versionIdx = Array.IndexOf(args, "--listen-ms");
+    if (versionIdx >= 0 && versionIdx + 1 < args.Length && int.TryParse(args[versionIdx + 1], out var versionParsed))
+    {
+        versionListenMs = versionParsed;
+    }
+
+    return await ProbeRfcommVersionAsync(targetName, versionListenMs);
 }
 
 // E2：注册通知链（v4 与 v3 各一轮）→ 长监听，观察 0x82xx ACK 与 0x8207。
@@ -784,44 +809,24 @@ static async Task<int> ProbeRfcommServicesAsync(string targetName)
 }
 
 // 交互式收集：持续读取给定时间窗；遇到耳机的 0x8509 时间请求立即应答（上游 probe 要求）。
+// 使用 SocketFrameReader 保证同一时刻只有一个挂起的 LoadAsync（否则 COMException 0x800710DD）。
 static async Task<List<byte>> CollectInteractiveAsync(StreamSocket socket, DataWriter writer, int ms)
 {
     var all = new List<byte>();
-    var reader = new DataReader(socket.InputStream) { InputStreamOptions = InputStreamOptions.Partial };
+    using var reader = new SocketFrameReader(socket.InputStream);
     var sw = Stopwatch.StartNew();
     var respondedUpTo = 0;
 
     while (sw.ElapsedMilliseconds < ms)
     {
         var remaining = (int)Math.Max(1, ms - sw.ElapsedMilliseconds);
-
-        // 不取消 LoadAsync：取消会连带释放 socket 流。
-        var loadTask = reader.LoadAsync(256).AsTask();
-        var completed = await Task.WhenAny(loadTask, Task.Delay(remaining));
-        if (completed != loadTask)
+        var chunk = await reader.ReadAsync(Math.Min(remaining, 500));
+        if (chunk is null)
         {
-            break;
+            continue;
         }
 
-        uint n;
-        try
-        {
-            n = await loadTask;
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"[接收异常] {ex.GetType().Name}: {ex.Message}");
-            break;
-        }
-
-        if (n == 0)
-        {
-            break;
-        }
-
-        var buf = new byte[n];
-        reader.ReadBytes(buf);
-        all.AddRange(buf);
+        all.AddRange(chunk);
 
         // 只对本次新增的帧做应答判定，避免重复应答同一帧。
         var frames = ParseFrames(all);
@@ -1422,3 +1427,236 @@ static async Task<bool> RadioIsOnAsync()
         return false;
     }
 }
+
+// E6/E7：查 GAIA 版本 → 按查得版本查电量 → 注册链 → 长监听。
+// 依据：官方 App 的 DeviceInfo.GAIA_VERSION 查询（GAIA VERSION 命令 0x0100），
+// 说明协议版本是运行时向设备查询的，而非按型号硬编码。
+static async Task<int> ProbeRfcommVersionAsync(string targetName, int listenMs)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    var writer = new DataWriter(socket.OutputStream);
+
+    // 握手（v4 已实测有效）
+    var hs = BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>());
+    Console.WriteLine($"=== 握手 v4 {Convert.ToHexString(hs)} ===");
+    await SendAsync(writer, hs);
+    ReportReceived("握手响应", await CollectInteractiveAsync(socket, writer, 3000));
+
+    // E6：版本查询矩阵 —— cmd 0x0100 (GAIA VERSION)
+    var working = new List<(int Ver, ushort Vendor)>();
+    Console.WriteLine();
+    Console.WriteLine("=== E6：GAIA 版本查询（cmd 0x0100）===");
+    foreach (var vendor in new ushort[] { 0x001B, 0x000A, 0x0020 })
+    {
+        foreach (var ver in new[] { 4, 3 })
+        {
+            var frame = BuildFrame(ver, vendor, 0x0100, Array.Empty<byte>());
+            Console.WriteLine($"--- 发送 ver={ver} vendor=0x{vendor:X4} cmd=0x0100 {Convert.ToHexString(frame)} ---");
+            await SendAsync(writer, frame);
+            var data = await CollectInteractiveAsync(socket, writer, 2500);
+            var frames = ParseFrames(data);
+            foreach (var fr in frames)
+            {
+                Console.WriteLine($"    响应 cmd=0x{fr.Command:X4} ver={fr.Version} payload={Convert.ToHexString(fr.Payload)}");
+                if (fr.Command is 0x8100 or 0x8101 or 0x0100)
+                {
+                    working.Add((ver, vendor));
+                }
+            }
+
+            if (data.Count == 0)
+            {
+                Console.WriteLine("    （无响应）");
+            }
+        }
+    }
+
+    // E7：按查得/常用组合发 0x0207
+    Console.WriteLine();
+    Console.WriteLine("=== E7：电量查询 0x0207（组合枚举）===");
+    var queryCombos = new List<(int Ver, ushort Vendor)>();
+    queryCombos.AddRange(working);
+    queryCombos.Add((3, 0x001B));
+    queryCombos.Add((4, 0x001B));
+    queryCombos.Add((3, 0x000A));
+    queryCombos.Add((4, 0x000A));
+
+    var seenCombos = new HashSet<(int, ushort)>();
+    foreach (var (ver, vendor) in queryCombos)
+    {
+        if (!seenCombos.Add((ver, vendor)))
+        {
+            continue;
+        }
+
+        var frame = BuildFrame(ver, vendor, 0x0207, Array.Empty<byte>());
+        Console.WriteLine($"--- 发送 ver={ver} vendor=0x{vendor:X4} cmd=0x0207 ---");
+        await SendAsync(writer, frame);
+        var data = await CollectInteractiveAsync(socket, writer, 3000);
+        foreach (var fr in ParseFrames(data))
+        {
+            var extra = fr.Command == 0x8207 && fr.Payload.Length >= 5
+                ? $"  ← 电量 左={fr.Payload[1]} 右={fr.Payload[2]} 仓={fr.Payload[3]} 充电位=0x{fr.Payload[4]:X2}"
+                : string.Empty;
+            Console.WriteLine($"    响应 cmd=0x{fr.Command:X4} ver={fr.Version} payload={Convert.ToHexString(fr.Payload)}{extra}");
+        }
+
+        if (data.Count == 0)
+        {
+            Console.WriteLine("    （无响应）");
+        }
+    }
+
+    // 注册链（v4）
+    Console.WriteLine();
+    Console.WriteLine("=== 注册通知链 v4：0x0202~0x0206 ===");
+    for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+    {
+        var frame = BuildFrame(4, 0x001B, cmd, Array.Empty<byte>());
+        Console.WriteLine($"--- 发送 {Convert.ToHexString(frame)} ---");
+        await SendAsync(writer, frame);
+        await Task.Delay(600);
+    }
+
+    // 长监听：请用户在此期间制造状态变化（取出耳机 / 开合盒盖）
+    Console.WriteLine();
+    Console.WriteLine($"=== 长监听 {listenMs} ms：现在请取出耳机或开合盒盖，制造状态变化 ===");
+    ReportReceived("长监听", await CollectInteractiveAsync(socket, writer, listenMs));
+
+    writer.DetachStream();
+    socket.Dispose();
+    Console.WriteLine();
+    Console.WriteLine("=== E6/E7 完成 ===");
+    return 0;
+}
+
+// E8：握手 → 注册链 → 长监听（带心跳），供用户配合制造状态变化。
+// 关注目标：0x8207 电量帧；次要目标：观察会话重建后耳机主动推送的其它 report。
+static async Task<int> ProbeRfcommHuntAsync(string targetName, int listenMs)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+    var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+    var infos = await DeviceInformation.FindAllAsync(selector);
+    if (infos.Count == 0)
+    {
+        Console.WriteLine("未匹配到经典蓝牙设备。");
+        return 2;
+    }
+
+    var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+    if (dev is null)
+    {
+        Console.WriteLine("FromIdAsync 返回 null。");
+        return 2;
+    }
+
+    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+    if (socket is null)
+    {
+        return 3;
+    }
+
+    var writer = new DataWriter(socket.OutputStream);
+
+    // 全程只用一个 SocketFrameReader 读 socket 输入流：WinRT 的 DataReader 不允许
+    // 多个挂起的 LoadAsync 并存，超时后重新发起会导致 COMException 0x800710DD。
+    using var reader = new SocketFrameReader(socket.InputStream);
+
+    var hs = BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>());
+    Console.WriteLine($"=== 握手 v4 {Convert.ToHexString(hs)} ===");
+    await SendAsync(writer, hs);
+    var hsData = await reader.CollectAsync(3000);
+    ReportReceived("握手响应", hsData);
+    foreach (var fr in ParseFrames(hsData))
+    {
+        if (fr.Command == 0x8300 && fr.Payload.Length >= 4)
+        {
+            Console.WriteLine($"★ 设备报告的 GAIA 版本：{fr.Payload[1]}.{fr.Payload[2]}.{fr.Payload[3]}（payload[0]=ACK）");
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("=== 注册通知链 v4：0x0202~0x0206 ===");
+    for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+    {
+        var frame = BuildFrame(4, 0x001B, cmd, Array.Empty<byte>());
+        await SendAsync(writer, frame);
+        await Task.Delay(500);
+    }
+
+    Console.WriteLine();
+    Console.WriteLine("############ 请现在操作耳机：取出 / 戴上 / 开合盒盖 / 重新入盒 ############");
+    Console.WriteLine($"### 监听 {listenMs / 1000} 秒，每 5 秒心跳一次，看到心跳即可随时操作 ###");
+    Console.WriteLine();
+
+    var sw = Stopwatch.StartNew();
+    var batteryHit = false;
+    var cmdCounts = new Dictionary<int, int>();
+    var lastHeartbeat = 0;
+
+    while (sw.ElapsedMilliseconds < listenMs)
+    {
+        var remaining = (int)Math.Max(1, listenMs - sw.ElapsedMilliseconds);
+        var chunk = await reader.ReadAsync(Math.Min(remaining, 1000));
+        if (chunk is null)
+        {
+            var sec = (int)(sw.ElapsedMilliseconds / 1000);
+            if (sec - lastHeartbeat >= 5)
+            {
+                lastHeartbeat = sec;
+                Console.WriteLine($"--- 心跳 t={sec}s，已收到各命令帧数：{string.Join(", ", cmdCounts.OrderBy(k => k.Key).Select(k => $"0x{k.Key:X4}×{k.Value}"))} ---");
+            }
+
+            continue;
+        }
+
+        foreach (var fr in ParseFrames(chunk.ToList()))
+        {
+            cmdCounts[fr.Command] = cmdCounts.TryGetValue(fr.Command, out var c) ? c + 1 : 1;
+            if (fr.Command == 0x8207)
+            {
+                batteryHit = true;
+                Console.WriteLine($"★★★ 命中 0x8207！ver={fr.Version} payload={Convert.ToHexString(fr.Payload)}");
+                if (fr.Payload.Length >= 5)
+                {
+                    Console.WriteLine($"    左={fr.Payload[1]} 右={fr.Payload[2]} 仓={fr.Payload[3]} 充电位=0x{fr.Payload[4]:X2}");
+                }
+            }
+            else if (fr.Command is not (0x8224 or 0x8300))
+            {
+                Console.WriteLine($"[帧] t={(int)(sw.ElapsedMilliseconds / 1000)}s cmd=0x{fr.Command:X4} ver={fr.Version} payload={Convert.ToHexString(fr.Payload)}");
+            }
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"=== 监听结束：各命令帧数 {string.Join(", ", cmdCounts.OrderBy(k => k.Key).Select(k => $"0x{k.Key:X4}×{k.Value}"))} ===");
+    Console.WriteLine(batteryHit ? "★ 本轮命中 0x8207" : "☆ 本轮未命中 0x8207");
+
+    writer.DetachStream();
+    socket.Dispose();
+    return 0;
+}
+
