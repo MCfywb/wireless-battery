@@ -16,10 +16,33 @@ internal static class Program
 {
     private const ushort CompanyId = 0x0837;
 
-    /// <summary>单次 poll 的扫描窗口（毫秒）。方案建议 poll 超时 3 秒，此处留出应答余量。</summary>
-    private const int PollScanMs = 2500;
+    /// <summary>
+    /// 单次 poll 的扫描窗口（毫秒）。
+    /// </summary>
+    /// <remarks>
+    /// 方案建议 poll 超时 3 秒，但实测耳机的 Fast Pair 广播在连接稳定后
+    /// 会降到约 10 秒一条，3 秒窗口经常扫不到新数据（此时返回 Stale 而非未找到）。
+    /// 这里取 12 秒以提高命中率；宿主侧的超时分级由 PluginHost 负责。
+    /// </remarks>
+    private const int PollScanMs = 12000;
 
     private const int DiscoverScanMs = 3000;
+
+    /// <summary>BLE 扫描器启动后的预热时间（毫秒），用于等无线电就绪。</summary>
+    private const int ScannerWarmupMs = 2500;
+
+    /// <summary>
+    /// 最近一次成功读数的缓存。
+    /// </summary>
+    /// <remarks>
+    /// 耳机的 Fast Pair 广播在连接稳定后会降到极低频（实测由约 13 次/秒降至约 10 秒一条），
+    /// 因此单次 poll 窗口很可能扫不到新数据。此时按 docs/development-plan.md §4.2
+    /// 返回 <c>Stale</c> 质量与上次成功时间，而不是误报「设备未找到」——
+    /// 后者会让 UI 把「暂时没刷新」显示成「设备消失」。
+    /// </remarks>
+    private static List<PluginReading>? _lastReadings;
+
+    private static DateTimeOffset? _lastSuccessUtc;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -34,6 +57,11 @@ internal static class Program
         var profile = LoadProfile();
         var matcher = new VivoTws3iModelMatcher(profile);
         using var scanner = new BleAdvertisementScanner(CompanyId);
+
+        // 扫描器常驻：先开启并预热，等 Windows 无线电就绪后再开始处理请求。
+        scanner.Start();
+        Thread.Sleep(ScannerWarmupMs);
+        scanner.Drain();
 
         string? inputLine;
         while ((inputLine = Console.In.ReadLine()) is not null)
@@ -190,6 +218,34 @@ internal static class Program
 
         if (chosen is null)
         {
+            // 广播频率可能极低：若有历史成功读数，按 §4.2 返回 Stale 而非「未找到」。
+            if (_lastReadings is not null && _lastSuccessUtc is not null)
+            {
+                var stale = new List<PluginReading>(_lastReadings.Count);
+                foreach (var r in _lastReadings)
+                {
+                    stale.Add(new PluginReading
+                    {
+                        Component = r.Component,
+                        Percentage = r.Percentage,
+                        Charging = r.Charging,
+                        Connected = r.Connected,
+                        Quality = nameof(ReadingQuality.Stale),
+                        Source = r.Source,
+                        DiagnosticCode = "NO_FRESH_ADVERTISEMENT_IN_WINDOW",
+                    });
+                }
+
+                diagnostics.Add($"stale:lastSuccessUtc={_lastSuccessUtc:O}");
+                return new PluginResponse
+                {
+                    RequestId = requestId,
+                    Ok = true,
+                    Readings = stale,
+                    Diagnostics = diagnostics,
+                };
+            }
+
             var notFound = new PluginResponse
             {
                 RequestId = requestId,
@@ -220,6 +276,9 @@ internal static class Program
             BuildReading(deviceId, deviceName, "chargingCase", chosen.ChargingCaseBattery,
                 chosen.ChargingCaseCharging, chosen.ConnectedState, chosen, now, source, "充电盒"),
         };
+
+        _lastReadings = readings;
+        _lastSuccessUtc = now;
 
         return new PluginResponse
         {
@@ -261,11 +320,18 @@ internal static class Program
         };
     }
 
+    /// <summary>
+    /// 在给定时间窗内收集广播。
+    /// </summary>
+    /// <remarks>
+    /// 扫描器在 Worker 启动时即已开启并保持常驻，不在每次请求时 Start/Stop：
+    /// Windows 的 BLE 无线电首次初始化耗时可达数秒，若每次 poll 都重启扫描器，
+    /// 首个请求会因窗口被初始化过程吃掉而误报「设备未找到」。
+    /// Worker 本身是常驻轮询进程，扫描器常驻的功耗影响可接受。
+    /// </remarks>
     private static IReadOnlyList<byte[]> Scan(BleAdvertisementScanner scanner, int windowMs)
     {
-        scanner.Start();
         Thread.Sleep(windowMs);
-        scanner.Stop();
         return scanner.Drain();
     }
 
