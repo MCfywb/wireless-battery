@@ -67,6 +67,20 @@ if (args.Contains("--ble-watch"))
     return await WatchBleAdvertisementsAsync(watchMs);
 }
 
+// 轻量广播监视：只扫广播 + 查 PC 侧连接状态，不做任何 GAIA 交互。
+// 用于把「广播频率与哪个变量相关」这个问题单独隔离出来。
+if (args.Contains("--ble-only"))
+{
+    var bleOnlyMs = 180000;
+    var bleOnlyIdx = Array.IndexOf(args, "--listen-ms");
+    if (bleOnlyIdx >= 0 && bleOnlyIdx + 1 < args.Length && int.TryParse(args[bleOnlyIdx + 1], out var bleOnlyParsed))
+    {
+        bleOnlyMs = bleOnlyParsed;
+    }
+
+    return await ProbeBleOnlyAsync(targetName, bleOnlyMs);
+}
+
 // 双连接对照实验：BLE 广播持续解析 + RFCOMM 连接周期性重试，全程记录。
 if (args.Contains("--dual-conn"))
 {
@@ -374,11 +388,33 @@ static async Task SendAsync(DataWriter writer, byte[] frame)
 }
 
 // 定向 SDP 查询私有通道并建立 RFCOMM 连接；失败时打印原因并返回 null。
-static async Task<StreamSocket?> ConnectPrivateChannelAsync(BluetoothDevice dev, string uuid)
+/// <summary>
+/// 建立私有 RFCOMM 通道。
+/// </summary>
+/// <remarks>
+/// <para>
+/// SDP 查询与 socket 连接都带超时保护：耳机断开连接（不在连接态）时，
+/// <c>GetRfcommServicesForIdAsync</c> 可能长时间不返回——实测超过 90 秒。
+/// 若不设超时，插件在设备离线时会整条轮询链卡死，UI 无法显示「设备不可用」。
+/// </para>
+/// <para>
+/// 超时采用 <c>Task.WhenAny</c> 放弃等待而不取消底层操作，避免取消导致流被释放。
+/// </para>
+/// </remarks>
+static async Task<StreamSocket?> ConnectPrivateChannelAsync(BluetoothDevice dev, string uuid, int timeoutMs = 8000)
 {
     Console.WriteLine($"经典蓝牙 ConnectionStatus: {dev.ConnectionStatus}");
     var svcId = RfcommServiceId.FromUuid(Guid.Parse(uuid));
-    var r = await dev.GetRfcommServicesForIdAsync(svcId, BluetoothCacheMode.Uncached);
+
+    var sdpTask = dev.GetRfcommServicesForIdAsync(svcId, BluetoothCacheMode.Uncached).AsTask();
+    var sdpDone = await Task.WhenAny(sdpTask, Task.Delay(timeoutMs));
+    if (sdpDone != sdpTask)
+    {
+        Console.WriteLine($"SDP 查询超时（{timeoutMs} ms，设备可能未连接）");
+        return null;
+    }
+
+    var r = await sdpTask;
     Console.WriteLine($"定向 SDP 命中数: {r.Services.Count}  error={r.Error}");
     if (r.Services.Count == 0)
     {
@@ -392,10 +428,19 @@ static async Task<StreamSocket?> ConnectPrivateChannelAsync(BluetoothDevice dev,
     var socket = new StreamSocket();
     try
     {
-        await socket.ConnectAsync(
+        var connectTask = socket.ConnectAsync(
             svc.ConnectionHostName,
             svc.ConnectionServiceName,
-            SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication);
+            SocketProtectionLevel.BluetoothEncryptionAllowNullAuthentication).AsTask();
+        var connectDone = await Task.WhenAny(connectTask, Task.Delay(timeoutMs));
+        if (connectDone != connectTask)
+        {
+            Console.WriteLine($"RFCOMM 连接超时（{timeoutMs} ms）");
+            socket.Dispose();
+            return null;
+        }
+
+        await connectTask;
         Console.WriteLine("RFCOMM 连接成功");
         return socket;
     }
@@ -1697,6 +1742,15 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
     string? lastGaiaError = null;
     var batteryFrames = 0;
 
+    // 广播时间戳队列：用于计算最近窗口内的实际频率（比累计值更能反映骤降/恢复）
+    var broadcastTimes = new Queue<DateTime>();
+
+    // PC 侧连接状态：经典蓝牙与 BLE 各一份。这是区分「真双连接」与「连接切换」的关键变量。
+    var classicStatus = "?";
+    var leStatus = "?";
+    var pcDevicePresent = false;
+    var loopIndex = 0;
+
     // BLE 扫描器常驻
     var watcher = new BluetoothLEAdvertisementWatcher();
     var payloads = new List<byte[]>();
@@ -1750,8 +1804,63 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
             lastBroadcast = (DateTime.Now, left, right, caseBattery, stateByte, chargeState);
         }
 
-        // ---- B) 尝试 GAIA 连接 ----
+        foreach (var _ in batch)
+        {
+            broadcastTimes.Enqueue(DateTime.Now);
+        }
+
+        while (broadcastTimes.Count > 0 && (DateTime.Now - broadcastTimes.Peek()).TotalSeconds > 20)
+        {
+            broadcastTimes.Dequeue();
+        }
+
+        var rate20s = broadcastTimes.Count / 20.0;
+
+        // ---- B) 采集 PC 侧连接状态 ----
+        try
+        {
+            var classicSelector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+            var classicInfos = await DeviceInformation.FindAllAsync(classicSelector);
+            pcDevicePresent = classicInfos.Count > 0;
+            classicStatus = "?";
+            if (pcDevicePresent)
+            {
+                var classicDev = await BluetoothDevice.FromIdAsync(classicInfos[0].Id);
+                classicStatus = classicDev?.ConnectionStatus.ToString() ?? "null";
+            }
+            else
+            {
+                classicStatus = "设备不在本机";
+            }
+
+            var leSelector = BluetoothLEDevice.GetDeviceSelectorFromDeviceName(targetName);
+            var leInfos = await DeviceInformation.FindAllAsync(leSelector);
+            if (leInfos.Count == 0)
+            {
+                leStatus = "设备不在本机";
+            }
+            else
+            {
+                var leDev = await BluetoothLEDevice.FromIdAsync(leInfos[0].Id);
+                leStatus = leDev?.ConnectionStatus.ToString() ?? "null";
+            }
+        }
+        catch (Exception ex)
+        {
+            classicStatus = $"查询失败:{ex.GetType().Name}";
+            leStatus = classicStatus;
+        }
+
+        // ---- C) 尝试 GAIA 连接（降频：每 3 轮一次，避免拖慢广播观测节奏）----
+        if (loopIndex % 3 != 0)
+        {
+            await Task.Delay(200);
+            continue;
+        }
+
+        loopIndex++;
         gaiaAttempts++;
+        var gaiaWatch = Stopwatch.StartNew();
         string gaiaNote;
         try
         {
@@ -1774,7 +1883,7 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
                     var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
                     if (socket is null)
                     {
-                        gaiaNote = $"连接失败（经典蓝牙状态={status}）";
+                        gaiaNote = $"连接失败（经典蓝牙状态={status}，耗时 {gaiaWatch.ElapsedMilliseconds} ms）";
                     }
                     else
                     {
@@ -1782,7 +1891,7 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
                         var writer = new DataWriter(socket.OutputStream);
                         await SendAsync(writer, BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>()));
                         using var reader = new SocketFrameReader(socket.InputStream);
-                        var data = await reader.CollectAsync(2500);
+                        var data = await reader.CollectAsync(2000);
                         var hs = ParseFrames(data).FirstOrDefault(f => f.Command == 0x8300);
                         var version = hs.Payload is { Length: >= 4 } ? $"{hs.Payload[1]}.{hs.Payload[2]}.{hs.Payload[3]}" : "?";
                         batteryFrames = 0;
@@ -1791,10 +1900,10 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
                         for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
                         {
                             await SendAsync(writer, BuildFrame(4, 0x001B, cmd, Array.Empty<byte>()));
-                            await Task.Delay(300);
+                            await Task.Delay(200);
                         }
 
-                        var listen = await reader.CollectAsync(4000);
+                        var listen = await reader.CollectAsync(3000);
                         foreach (var f in ParseFrames(listen))
                         {
                             if (f.Command == 0x8207)
@@ -1803,7 +1912,7 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
                             }
                         }
 
-                        gaiaNote = $"连接成功，GAIA 版本 {version}，4 秒内收到 0x8207 × {batteryFrames}";
+                        gaiaNote = $"连接成功（耗时 {gaiaWatch.ElapsedMilliseconds} ms），GAIA 版本 {version}，3 秒内 0x8207 × {batteryFrames}";
                         try { writer.DetachStream(); } catch { }
                         socket.Dispose();
                     }
@@ -1819,13 +1928,14 @@ static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
 
         // ---- 状态输出 ----
         var sec = (int)(sw.ElapsedMilliseconds / 1000);
-        if (sec - lastStatusPrint >= 10 || sec < 12)
+        if (sec - lastStatusPrint >= 5 || sec < 6)
         {
             lastStatusPrint = sec;
             var b = lastBroadcast;
             var bt = b.DateTime == DateTime.MinValue ? "(无)" : $"{b.Left}/{b.Right}/{b.Case}";
             var age = b.DateTime == DateTime.MinValue ? "-" : $"{(DateTime.Now - b.DateTime).TotalSeconds:F0}s前";
-            Console.WriteLine($"t={sec,3}s | 广播累计 {broadcastCount,4} 条 | 最新电量 {bt} ({age}) | 状态字节 0x{b.State:X2} 充电位 0x{b.Charge:X2}");
+            Console.WriteLine($"t={sec,3}s | 广播 {rate20s,5:F2} 次/秒(近20s) 累计 {broadcastCount,4} | 电量 {bt} ({age}) | 状态字节 0x{b.State:X2} 充电位 0x{b.Charge:X2}");
+            Console.WriteLine($"        PC 连接：经典蓝牙={classicStatus}  BLE={leStatus}");
             Console.WriteLine($"        GAIA 第 {gaiaAttempts} 次尝试：成功 {gaiaOk} 次 → {gaiaNote}");
         }
 
@@ -1866,4 +1976,134 @@ static bool TryParseAdvertisement(byte[] payload, out int? left, out int? right,
     right = Read(payload[10]);
     left = Read(payload[11]);
     return true;
+}
+
+// 轻量广播监视：只观测，不与设备交互。
+static async Task<int> ProbeBleOnlyAsync(string targetName, int totalMs)
+{
+    const ushort CompanyId = 0x0837;
+
+    Console.WriteLine("=== 轻量广播监视（只读，无任何写操作）===");
+    Console.WriteLine("每 2 秒输出：广播频率（近 10 秒窗口）、最新三部件电量、状态字节、PC 侧连接状态");
+    Console.WriteLine();
+
+    var sw = Stopwatch.StartNew();
+    var watcher = new BluetoothLEAdvertisementWatcher();
+    var payloads = new List<byte[]>();
+    var gate = new object();
+    var times = new Queue<DateTime>();
+
+    TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> onAdv = (_, e) =>
+    {
+        foreach (var md in e.Advertisement.ManufacturerData)
+        {
+            if (md.CompanyId != CompanyId)
+            {
+                continue;
+            }
+
+            var raw = new byte[md.Data.Length];
+            using (var dr = Windows.Storage.Streams.DataReader.FromBuffer(md.Data))
+            {
+                dr.ReadBytes(raw);
+            }
+
+            lock (gate)
+            {
+                payloads.Add(raw);
+            }
+        }
+    };
+
+    watcher.Received += onAdv;
+    watcher.Start();
+    await Task.Delay(2000);
+
+    var lastPrint = -1;
+    var lastLeft = (int?)null;
+    var lastRight = (int?)null;
+    var lastCase = (int?)null;
+    var lastState = -1;
+    var lastCharge = -1;
+    var lastAt = DateTime.MinValue;
+    var total = 0;
+
+    while (sw.ElapsedMilliseconds < totalMs)
+    {
+        List<byte[]> batch;
+        lock (gate)
+        {
+            batch = payloads.ToList();
+            payloads.Clear();
+        }
+
+        total += batch.Count;
+        foreach (var p in batch)
+        {
+            times.Enqueue(DateTime.Now);
+            if (TryParseAdvertisement(p, out var l, out var r, out var c, out var st, out var ch))
+            {
+                lastLeft = l;
+                lastRight = r;
+                lastCase = c;
+                lastState = st;
+                lastCharge = ch;
+                lastAt = DateTime.Now;
+            }
+        }
+
+        while (times.Count > 0 && (DateTime.Now - times.Peek()).TotalSeconds > 10)
+        {
+            times.Dequeue();
+        }
+
+        var sec = (int)(sw.ElapsedMilliseconds / 1000);
+        if (sec / 2 != lastPrint)
+        {
+            lastPrint = sec / 2;
+
+            string classic = "?";
+            string le = "?";
+            try
+            {
+                var ci = await DeviceInformation.FindAllAsync(BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName));
+                if (ci.Count == 0)
+                {
+                    classic = "不在本机";
+                }
+                else
+                {
+                    var cd = await BluetoothDevice.FromIdAsync(ci[0].Id);
+                    classic = cd?.ConnectionStatus.ToString() ?? "null";
+                }
+
+                var li = await DeviceInformation.FindAllAsync(BluetoothLEDevice.GetDeviceSelectorFromDeviceName(targetName));
+                if (li.Count == 0)
+                {
+                    le = "不在本机";
+                }
+                else
+                {
+                    var ld = await BluetoothLEDevice.FromIdAsync(li[0].Id);
+                    le = ld?.ConnectionStatus.ToString() ?? "null";
+                }
+            }
+            catch (Exception ex)
+            {
+                classic = $"异常:{ex.GetType().Name}";
+                le = classic;
+            }
+
+            var rate = times.Count / 10.0;
+            var age = lastAt == DateTime.MinValue ? "-" : $"{(DateTime.Now - lastAt).TotalSeconds:F0}s前";
+            Console.WriteLine($"t={sec,3}s | 广播 {rate,5:F2} 次/秒(近10s) 累计 {total,4} | 电量 {lastLeft}/{lastRight}/{lastCase} ({age}) | 状态字节 0x{lastState:X2} 充电位 0x{lastCharge:X2} | PC: 经典={classic} BLE={le}");
+        }
+
+        await Task.Delay(200);
+    }
+
+    watcher.Stop();
+    Console.WriteLine();
+    Console.WriteLine($"=== 结束：广播累计 {total} 条 ===");
+    return 0;
 }
