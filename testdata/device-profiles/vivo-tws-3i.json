@@ -100,6 +100,26 @@
     ]
   },
 
+  "bleAdvertisement": {
+    "_note": "字段语义由官方 App 源码确认（TwsParserV1 + TwsFastPairDeviceBean），非推测。Windows 的 ManufacturerData 已剥离 CompanyId，下表偏移以此为基准；完整 AD 为 21 字节（含 2 字节 CompanyId）。",
+    "companyId": "0x0837",
+    "adLength": 21,
+    "layout": [
+      { "offset": 0, "size": 1, "field": "bleType", "note": "固定 0x08" },
+      { "offset": 1, "size": 1, "field": "version", "note": "V1 = 0x01" },
+      { "offset": 2, "size": 6, "field": "mac" },
+      { "offset": 8, "size": 1, "field": "baseStateEarbudsCount", "bits": { "0": "左耳在盒", "1": "右耳在盒", "2": "基座闭合" } },
+      { "offset": 9, "size": 1, "field": "baseBatteryPercent", "note": "充电盒电量" },
+      { "offset": 10, "size": 1, "field": "rightBatteryPercent" },
+      { "offset": 11, "size": 1, "field": "leftBatteryPercent" },
+      { "offset": 12, "size": 1, "field": "chargeState", "bits": { "0": "左耳充电中", "1": "右耳充电中", "2": "充电盒充电中" } },
+      { "offset": 13, "size": 1, "field": "modelId" },
+      { "offset": 14, "size": 4, "field": "unknown_4bytes", "note": "语义未确认，非电量" }
+    ],
+    "invalidValue": "0xFF 表示该部件未提供；不得显示为 0",
+    "crossCheck": "与 RFCOMM 埋点 0x8224 的 C 字段（左_右）逐值一致，实测三轮"
+  },
+
   "chargingBits": {
     "NO_EARBUD_IN_BASE": 0,
     "LEFT_EARBUD_IN_BASE": 1,
