@@ -51,17 +51,19 @@ internal static class GaiaActiveReader
         string? ErrorMessage = null);
 
     /// <summary>执行一次主动读取。</summary>
-    /// <param name="deviceName">经典蓝牙设备名（取自 profile 的蓝牙名前缀）。</param>
+    /// <param name="deviceName">经典蓝牙设备名（取自 profile 的蓝牙名前缀），仅作兜底匹配用。</param>
+    /// <param name="knownMac">被动广播已探明的设备 MAC（冒号分隔大写），与经典蓝牙地址一致，优先用于精确匹配。</param>
     /// <param name="listenMs">建链后等待上报的毫秒数。</param>
     /// <param name="cancellationToken">取消令牌。</param>
     public static async Task<GaiaActiveReadResult> ReadAsync(
         string deviceName,
+        string? knownMac,
         int listenMs,
         CancellationToken cancellationToken)
     {
         var diagnostics = new List<string>();
 
-        var device = await FindDeviceAsync(deviceName, diagnostics).ConfigureAwait(false);
+        var device = await FindDeviceAsync(deviceName, knownMac, diagnostics).ConfigureAwait(false);
         if (device is null)
         {
             return new GaiaActiveReadResult(
@@ -207,25 +209,100 @@ internal static class GaiaActiveReader
     }
 
     private static async Task<BluetoothDevice?> FindDeviceAsync(
-        string deviceName, List<string> diagnostics)
+        string deviceName, string? knownMac, List<string> diagnostics)
     {
-        var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(deviceName);
-        var infos = await WithTimeout(
-            DeviceInformation.FindAllAsync(selector).AsTask(),
-            FindTimeoutMs, diagnostics, "find").ConfigureAwait(false);
+        // 主路径：用被动广播已探明的 MAC 精确匹配。
+        // 经验证本型号经典蓝牙地址 == BLE 地址（active:deviceId 与被动 bt: 标识完全一致），
+        // 因此 GetDeviceSelectorFromBluetoothAddress 能稳定命中，且不依赖设备名/连接态。
+        if (TryParseMac(knownMac, out var addr))
+        {
+            var byAddr = await WithTimeout(
+                DeviceInformation.FindAllAsync(
+                    BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(addr)).AsTask(),
+                FindTimeoutMs, diagnostics, "findByAddress").ConfigureAwait(false);
 
-        diagnostics.Add($"active:classicCandidates={infos?.Count ?? -1}");
-        if (infos is null || infos.Count == 0)
+            diagnostics.Add($"active:byAddressCandidates={byAddr?.Count ?? -1} mac={knownMac}");
+            if (byAddr is { Count: > 0 })
+            {
+                var dev = await WithTimeout(
+                    BluetoothDevice.FromIdAsync(byAddr[0].Id).AsTask(),
+                    FindTimeoutMs, diagnostics, "fromId").ConfigureAwait(false);
+                if (dev is not null)
+                {
+                    diagnostics.Add("active:foundBy=address");
+                    return dev;
+                }
+            }
+        }
+
+        // 兜底：枚举所有已配对蓝牙设备，按名字（不区分大小写、子串）匹配。
+        // 不用 GetDeviceSelectorFromDeviceName（精确匹配且要求设备处于可见/连接态），
+        // 配对但未连接的设备它会返回 0，正是此前「classicCandidates=0」的根因。
+        var selector = BluetoothDevice.GetDeviceSelector();
+        var all = await WithTimeout(
+            DeviceInformation.FindAllAsync(selector).AsTask(),
+            FindTimeoutMs, diagnostics, "findAll").ConfigureAwait(false);
+
+        diagnostics.Add($"active:enumCount={all?.Count ?? -1}");
+        if (all is null || all.Count == 0)
         {
             return null;
         }
 
-        var device = await WithTimeout(
-            BluetoothDevice.FromIdAsync(infos[0].Id).AsTask(),
-            FindTimeoutMs, diagnostics, "fromId").ConfigureAwait(false);
+        BluetoothDevice? fallback = null;
+        foreach (var info in all)
+        {
+            diagnostics.Add($"active:enumName={info.Name}");
+            if (fallback is null
+                && info.Name.Contains(deviceName, StringComparison.OrdinalIgnoreCase))
+            {
+                fallback = await WithTimeout(
+                    BluetoothDevice.FromIdAsync(info.Id).AsTask(),
+                    FindTimeoutMs, diagnostics, "fromId").ConfigureAwait(false);
+            }
+        }
 
-        diagnostics.Add($"active:fromId={(device is null ? "null" : device.ConnectionStatus.ToString())}");
-        return device;
+        if (fallback is not null)
+        {
+            diagnostics.Add($"active:foundBy=name name={deviceName}");
+        }
+
+        return fallback;
+    }
+
+    /// <summary>
+    /// 把 <c>XX:XX:XX:XX:XX:XX</c> 形式的 MAC 解析为 <see cref="BluetoothDevice.BluetoothAddress"/>
+    /// 所用的 48 位大端整数。解析失败返回 <c>false</c>。
+    /// </summary>
+    private static bool TryParseMac(string? mac, out ulong address)
+    {
+        address = 0;
+        if (string.IsNullOrWhiteSpace(mac))
+        {
+            return false;
+        }
+
+        var parts = mac.Split(':', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length != 6)
+        {
+            return false;
+        }
+
+        try
+        {
+            ulong value = 0;
+            foreach (var part in parts)
+            {
+                value = (value << 8) | Convert.ToByte(part, 16);
+            }
+
+            address = value;
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
     }
 
     /// <summary>

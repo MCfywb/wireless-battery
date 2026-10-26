@@ -62,6 +62,16 @@ internal static class Program
 
     private static DateTimeOffset? _lastSuccessUtc;
 
+    /// <summary>
+    /// 最近一次被动广播探明的设备 MAC（<c>XX:XX:…</c>）。
+    /// </summary>
+    /// <remarks>
+    /// 主动读取用它做精确地址匹配（经验证本型号经典地址 == BLE 地址），
+    /// 规避了「按名字枚举在配对未连接时返回 0」的坑。Worker 是常驻进程，
+    /// 设备被托盘显示前必已被动探明，故点击刷新时此处通常有值。
+    /// </remarks>
+    private static string? _lastMac;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false,
@@ -144,7 +154,7 @@ internal static class Program
                 return Poll(request.RequestId, matcher, scanner);
 
             case PluginMethods.ActiveRead:
-                return await ActiveRead(request.RequestId, matcher).ConfigureAwait(false);
+                return await ActiveRead(request, matcher).ConfigureAwait(false);
 
             case PluginMethods.Diagnostics:
                 return new PluginResponse
@@ -182,15 +192,25 @@ internal static class Program
     /// <para>充电位只解码**盒**（bit2）：这是唯一经双通道交叉验证过的位（§22）。
     /// 左右耳充电位（bit0/bit1）语义未验证，一律留未知。</para>
     /// </remarks>
-    private static async Task<PluginResponse> ActiveRead(string requestId, VivoTws3iModelMatcher matcher)
+    private static async Task<PluginResponse> ActiveRead(PluginRequest request, VivoTws3iModelMatcher matcher)
     {
         var diagnostics = new List<string>();
+        var requestId = request.RequestId;
         var name = matcher.Profile.BluetoothNamePrefixes.FirstOrDefault() ?? "vivo TWS 3i";
+
+        // 优先用被动广播探明的 MAC；缺失时回退到请求携带的 deviceId（形如 bt:XX:XX:…）。
+        var knownMac = _lastMac;
+        if (string.IsNullOrWhiteSpace(knownMac)
+            && !string.IsNullOrWhiteSpace(request.DeviceId)
+            && request.DeviceId.StartsWith("bt:", StringComparison.OrdinalIgnoreCase))
+        {
+            knownMac = request.DeviceId.Substring(3);
+        }
 
         // 硬上限：即便某步 WinRT 调用意外挂死（设备处于不可查询状态），
         // 也必须在宿主 90s 超时前返回可控错误，而不是让 UI 干等。
         var readTask = GaiaActiveReader
-            .ReadAsync(name, ActiveReadListenMs, CancellationToken.None);
+            .ReadAsync(name, knownMac, ActiveReadListenMs, CancellationToken.None);
         var hardCap = Task.Delay(HardTimeoutMs);
         GaiaActiveReader.GaiaActiveReadResult result;
         if (await Task.WhenAny(readTask, hardCap).ConfigureAwait(false) != readTask)
@@ -298,6 +318,10 @@ internal static class Program
             if (seen.Add(adv.MacAddress))
             {
                 devices.Add((adv.MacAddress, adv.ModelId, adv.Format));
+                if (string.IsNullOrWhiteSpace(_lastMac))
+                {
+                    _lastMac = adv.MacAddress;
+                }
             }
         }
 
@@ -337,6 +361,7 @@ internal static class Program
             }
 
             chosen = adv;
+            _lastMac = adv.MacAddress;
             break;
         }
 
