@@ -47,6 +47,22 @@ public sealed class PluginRequest
 /// <summary>响应中的单个部件读数。</summary>
 public sealed class PluginReading
 {
+    /// <summary>
+    /// 设备标识。宿主据此把读数归并到具体设备。
+    /// </summary>
+    /// <remarks>
+    /// 兼容新增字段：早期 Worker 不返回该字段时，宿主回退为「插件内唯一设备」或「插件 id + default」，
+    /// 不得把不同设备的读数错误归并（§4.2 按稳定设备 ID 去重）。
+    /// </remarks>
+    [JsonPropertyName("deviceId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeviceId { get; set; }
+
+    /// <summary>设备显示名；缺失时宿主回退为设备标识。</summary>
+    [JsonPropertyName("deviceName")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? DeviceName { get; set; }
+
     /// <summary>部件名，取 <see cref="BatteryComponent"/> 的 camelCase 形式。</summary>
     [JsonPropertyName("component")]
     public string Component { get; set; } = string.Empty;

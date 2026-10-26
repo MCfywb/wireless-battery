@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>PeripheralBattery.Core</RootNamespace>
+    <AssemblyName>PeripheralBattery.Core</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PeripheralBattery.PluginSdk\PeripheralBattery.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

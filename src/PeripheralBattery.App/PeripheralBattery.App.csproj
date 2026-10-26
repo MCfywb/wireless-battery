@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <RootNamespace>PeripheralBattery.App</RootNamespace>
+    <AssemblyName>PeripheralBattery.App</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PeripheralBattery.Core\PeripheralBattery.Core.csproj" />
+    <ProjectReference Include="..\PeripheralBattery.PluginHost\PeripheralBattery.PluginHost.csproj" />
+    <ProjectReference Include="..\PeripheralBattery.PluginSdk\PeripheralBattery.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

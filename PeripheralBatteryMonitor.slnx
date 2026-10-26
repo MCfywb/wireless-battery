@@ -8,8 +8,13 @@
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/PeripheralBattery.PluginSdk/PeripheralBattery.PluginSdk.csproj" />
+    <Project Path="src/PeripheralBattery.Core/PeripheralBattery.Core.csproj" />
+    <Project Path="src/PeripheralBattery.PluginHost/PeripheralBattery.PluginHost.csproj" />
+    <Project Path="src/PeripheralBattery.App/PeripheralBattery.App.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/PeripheralBattery.Protocol.Tests/PeripheralBattery.Protocol.Tests.csproj" />
+    <Project Path="tests/PeripheralBattery.Core.Tests/PeripheralBattery.Core.Tests.csproj" />
+    <Project Path="tests/PeripheralBattery.PluginHost.Tests/PeripheralBattery.PluginHost.Tests.csproj" />
   </Folder>
 </Solution>

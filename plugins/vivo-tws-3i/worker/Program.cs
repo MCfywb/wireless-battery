@@ -301,15 +301,14 @@ internal static class Program
         string source,
         string componentName)
     {
-        _ = deviceId;
-        _ = deviceName;
-
         var diagnosticCode = percentage is null
             ? adv.Diagnostics.FirstOrDefault(d => d.Contains(componentName, StringComparison.Ordinal))
             : null;
 
         return new PluginReading
         {
+            DeviceId = deviceId,
+            DeviceName = deviceName,
             Component = component,
             Percentage = percentage,
             Charging = charging,
