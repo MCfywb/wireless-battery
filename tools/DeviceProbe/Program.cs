@@ -67,6 +67,19 @@ if (args.Contains("--ble-watch"))
     return await WatchBleAdvertisementsAsync(watchMs);
 }
 
+// 双连接对照实验：BLE 广播持续解析 + RFCOMM 连接周期性重试，全程记录。
+if (args.Contains("--dual-conn"))
+{
+    var dualMs = 240000;
+    var dualIdx = Array.IndexOf(args, "--listen-ms");
+    if (dualIdx >= 0 && dualIdx + 1 < args.Length && int.TryParse(args[dualIdx + 1], out var dualParsed))
+    {
+        dualMs = dualParsed;
+    }
+
+    return await ProbeDualConnectionAsync(targetName, dualMs);
+}
+
 // E8：握手 → 注册链 → 长时间监听并打心跳，供用户配合制造状态变化（找 0x8207）。
 if (args.Contains("--rfcomm-hunt"))
 {
@@ -1660,3 +1673,197 @@ static async Task<int> ProbeRfcommHuntAsync(string targetName, int listenMs)
     return 0;
 }
 
+// 双连接对照实验。
+// 目标：① 手机与 PC 同时连接耳机时，BLE 广播的三部件电量是否仍然正确；
+//       ② 双连接下 PC 侧能否建立 GAIA 会话（RFCOMM），若不能，失败原因是什么。
+// 做法：BLE 扫描器常驻并周期性解析；RFCOMM 侧周期性尝试连接（失败即重试），
+//       以便观察「连接被占用」这类失败是否可恢复。
+static async Task<int> ProbeDualConnectionAsync(string targetName, int totalMs)
+{
+    const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+    const ushort CompanyId = 0x0837;
+
+    Console.WriteLine("=== 双连接对照实验 ===");
+    Console.WriteLine("本程序会持续做两件事：");
+    Console.WriteLine("  A) 被动扫描 BLE 广播并解析三部件电量（每 3 秒刷新一次显示）");
+    Console.WriteLine("  B) 每 8 秒尝试建立 GAIA(RFCOMM) 连接，观察双连接下是否被占用");
+    Console.WriteLine();
+
+    var sw = Stopwatch.StartNew();
+    var lastBroadcast = (DateTime: DateTime.MinValue, Left: (int?)null, Right: (int?)null, Case: (int?)null, State: -1, Charge: -1);
+    var broadcastCount = 0;
+    var gaiaAttempts = 0;
+    var gaiaOk = 0;
+    string? lastGaiaError = null;
+    var batteryFrames = 0;
+
+    // BLE 扫描器常驻
+    var watcher = new BluetoothLEAdvertisementWatcher();
+    var payloads = new List<byte[]>();
+    var gate = new object();
+    TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> onAdv = (_, e) =>
+    {
+        foreach (var md in e.Advertisement.ManufacturerData)
+        {
+            if (md.CompanyId != CompanyId)
+            {
+                continue;
+            }
+
+            var raw = new byte[md.Data.Length];
+            using (var dr = Windows.Storage.Streams.DataReader.FromBuffer(md.Data))
+            {
+                dr.ReadBytes(raw);
+            }
+
+            lock (gate)
+            {
+                payloads.Add(raw);
+            }
+        }
+    };
+
+    watcher.Received += onAdv;
+    watcher.Start();
+    await Task.Delay(2500);
+
+    var lastStatusPrint = 0;
+
+    while (sw.ElapsedMilliseconds < totalMs)
+    {
+        // ---- A) 处理广播 ----
+        List<byte[]> batch;
+        lock (gate)
+        {
+            batch = payloads.ToList();
+            payloads.Clear();
+        }
+
+        broadcastCount += batch.Count;
+        foreach (var payload in batch)
+        {
+            if (!TryParseAdvertisement(payload, out var left, out var right, out var caseBattery, out var stateByte, out var chargeState))
+            {
+                continue;
+            }
+
+            lastBroadcast = (DateTime.Now, left, right, caseBattery, stateByte, chargeState);
+        }
+
+        // ---- B) 尝试 GAIA 连接 ----
+        gaiaAttempts++;
+        string gaiaNote;
+        try
+        {
+            var selector = BluetoothDevice.GetDeviceSelectorFromDeviceName(targetName);
+            var infos = await DeviceInformation.FindAllAsync(selector);
+            if (infos.Count == 0)
+            {
+                gaiaNote = "未匹配到经典蓝牙设备";
+            }
+            else
+            {
+                var dev = await BluetoothDevice.FromIdAsync(infos[0].Id);
+                if (dev is null)
+                {
+                    gaiaNote = "FromIdAsync 返回 null";
+                }
+                else
+                {
+                    var status = dev.ConnectionStatus;
+                    var socket = await ConnectPrivateChannelAsync(dev, VivoPrivateUuid);
+                    if (socket is null)
+                    {
+                        gaiaNote = $"连接失败（经典蓝牙状态={status}）";
+                    }
+                    else
+                    {
+                        gaiaOk++;
+                        var writer = new DataWriter(socket.OutputStream);
+                        await SendAsync(writer, BuildFrame(4, 0x000A, 0x0300, Array.Empty<byte>()));
+                        using var reader = new SocketFrameReader(socket.InputStream);
+                        var data = await reader.CollectAsync(2500);
+                        var hs = ParseFrames(data).FirstOrDefault(f => f.Command == 0x8300);
+                        var version = hs.Payload is { Length: >= 4 } ? $"{hs.Payload[1]}.{hs.Payload[2]}.{hs.Payload[3]}" : "?";
+                        batteryFrames = 0;
+
+                        // 注册通知链并短暂监听，看是否能收到 0x8207
+                        for (var cmd = 0x0202; cmd <= 0x0206; cmd++)
+                        {
+                            await SendAsync(writer, BuildFrame(4, 0x001B, cmd, Array.Empty<byte>()));
+                            await Task.Delay(300);
+                        }
+
+                        var listen = await reader.CollectAsync(4000);
+                        foreach (var f in ParseFrames(listen))
+                        {
+                            if (f.Command == 0x8207)
+                            {
+                                batteryFrames++;
+                            }
+                        }
+
+                        gaiaNote = $"连接成功，GAIA 版本 {version}，4 秒内收到 0x8207 × {batteryFrames}";
+                        try { writer.DetachStream(); } catch { }
+                        socket.Dispose();
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            gaiaNote = $"异常 {ex.GetType().Name}: {ex.Message}";
+        }
+
+        lastGaiaError = gaiaNote;
+
+        // ---- 状态输出 ----
+        var sec = (int)(sw.ElapsedMilliseconds / 1000);
+        if (sec - lastStatusPrint >= 10 || sec < 12)
+        {
+            lastStatusPrint = sec;
+            var b = lastBroadcast;
+            var bt = b.DateTime == DateTime.MinValue ? "(无)" : $"{b.Left}/{b.Right}/{b.Case}";
+            var age = b.DateTime == DateTime.MinValue ? "-" : $"{(DateTime.Now - b.DateTime).TotalSeconds:F0}s前";
+            Console.WriteLine($"t={sec,3}s | 广播累计 {broadcastCount,4} 条 | 最新电量 {bt} ({age}) | 状态字节 0x{b.State:X2} 充电位 0x{b.Charge:X2}");
+            Console.WriteLine($"        GAIA 第 {gaiaAttempts} 次尝试：成功 {gaiaOk} 次 → {gaiaNote}");
+        }
+
+        await Task.Delay(200);
+    }
+
+    watcher.Stop();
+    Console.WriteLine();
+    Console.WriteLine("=== 实验结束 ===");
+    Console.WriteLine($"广播累计 {broadcastCount} 条；GAIA 尝试 {gaiaAttempts} 次，成功 {gaiaOk} 次");
+    Console.WriteLine($"最后一次 GAIA 结果：{lastGaiaError}");
+    return 0;
+}
+
+// 解析 vivo TWS 广播为三部件电量（偏移见官方 App TwsParserV1）。
+static bool TryParseAdvertisement(byte[] payload, out int? left, out int? right, out int? caseBattery, out int stateByte, out int chargeState)
+{
+    left = null;
+    right = null;
+    caseBattery = null;
+    stateByte = 0;
+    chargeState = 0;
+
+    if (payload.Length < 14 || payload[0] != 0x08 || payload[1] != 0x01)
+    {
+        return false;
+    }
+
+    stateByte = payload[8];
+    chargeState = payload[12];
+
+    static int? Read(byte v)
+    {
+        return v == 0xFF || v > 100 ? null : v;
+    }
+
+    caseBattery = Read(payload[9]);
+    right = Read(payload[10]);
+    left = Read(payload[11]);
+    return true;
+}
