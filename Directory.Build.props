@@ -1,0 +1,34 @@
+<Project>
+
+  <!--
+    全局构建属性。适用于本仓库下所有项目。
+    注意：WinRT 投影需要带版本号的 TFM（net10.0-windows10.0.26100.0），
+    裸 net10.0-windows 不含 Windows SDK 投影，实测 BLE/RFCOMM 无法编译。
+    因此本文件不设统一 TargetFramework，由各项目自行声明。
+  -->
+
+  <PropertyGroup>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <WarningLevel>5</WarningLevel>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <Deterministic>true</Deterministic>
+    <NoWarn>$(NoWarn);CA1848</NoWarn>
+  </PropertyGroup>
+
+  <!-- 产品版本号，见 DECISIONS.md 的 manifest minHostVersion 约定 -->
+  <PropertyGroup>
+    <ProductVersion>0.1.0</ProductVersion>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <FileVersion>0.1.0.0</FileVersion>
+    <Company>PeripheralBatteryMonitor</Company>
+  </PropertyGroup>
+
+</Project>

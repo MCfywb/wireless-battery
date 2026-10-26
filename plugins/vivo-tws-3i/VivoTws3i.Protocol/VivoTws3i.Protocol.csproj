@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>VivoTws3i.Protocol</RootNamespace>
+    <AssemblyName>VivoTws3i.Protocol</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\..\src\PeripheralBattery.PluginSdk\PeripheralBattery.PluginSdk.csproj" />
+  </ItemGroup>
+
+</Project>

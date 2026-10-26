@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/plugins/" />
+  <Folder Name="/plugins/vivo-tws-3i/">
+    <Project Path="plugins/vivo-tws-3i/VivoTws3i.Protocol/VivoTws3i.Protocol.csproj" />
+  </Folder>
+  <Folder Name="/plugins/vivo-tws-3i/worker/">
+    <Project Path="plugins/vivo-tws-3i/worker/VivoTws3i.Worker.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/PeripheralBattery.PluginSdk/PeripheralBattery.PluginSdk.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/PeripheralBattery.Protocol.Tests/PeripheralBattery.Protocol.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>PeripheralBattery.PluginSdk</RootNamespace>
+    <AssemblyName>PeripheralBattery.PluginSdk</AssemblyName>
+  </PropertyGroup>
+
+</Project>

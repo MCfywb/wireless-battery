@@ -1,0 +1,2 @@
+# 未连接：状态字节高 2 位（mPairState）= 00，isConnectedState 应为 false
+08 01 02 00 00 00 00 00 03 64 53 5C 00 85 3F 00 00 00

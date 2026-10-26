@@ -1,0 +1,27 @@
+{
+  "manifestVersion": 1,
+  "id": "vivo-tws-3i",
+  "name": "vivo TWS 3i 电量适配器",
+  "version": "0.1.0",
+  "minHostVersion": "0.1.0",
+  "worker": "worker/VivoTws3i.Worker.exe",
+  "transports": ["ble-advertisement"],
+  "deviceMatchers": {
+    "bluetoothNamePrefixes": ["vivo TWS 3i"],
+    "serviceUuids": [],
+    "usbVidPid": [],
+    "modelIds": [132, 133]
+  },
+  "capabilities": {
+    "batteryComponents": ["leftEarbud", "rightEarbud", "chargingCase"],
+    "readOnly": true,
+    "requiresAdministrator": false,
+    "usesNetwork": false
+  },
+  "verification": {
+    "status": "captured",
+    "testedModels": ["vivo TWS 3i (model 132/133)"],
+    "testedFirmware": ["2.19.7_2.19.7"],
+    "notes": "取数路径为 BLE 广播被动监听（只读、零连接、零写入）。已取得可重复的原始样本并与 RFCOMM 埋点通道逐值交叉验证一致；离线 parser 测试已覆盖。尚未与官方 App 显示值完成实机交叉验证，故未达 hardware-verified。同系列长续航版 model 144/145 未实测，不在支持列表内。"
+  }
+}

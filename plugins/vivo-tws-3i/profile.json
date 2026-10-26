@@ -1,0 +1,13 @@
+{
+  "pluginId": "vivo-tws-3i",
+  "companyId": 2103,
+  "supportedFormats": ["tws-v1"],
+  "modelIds": [132, 133],
+  "modelNames": {
+    "132": "vivo TWS 3i",
+    "133": "vivo TWS 3i"
+  },
+  "knownButUnverifiedModelIds": [144, 145],
+  "projectNames": ["DPD2407A"],
+  "bluetoothNamePrefixes": ["vivo TWS 3i"]
+}
