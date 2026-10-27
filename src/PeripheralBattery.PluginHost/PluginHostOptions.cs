@@ -29,11 +29,17 @@ public sealed class PluginHostOptions
     /// 轮询请求超时。
     /// </summary>
     /// <remarks>
-    /// 方案建议普通 poll 初始 3 秒，但本仓库实测 vivo TWS 3i 的广播扫描窗口为 12 秒
-    /// （Fast Pair 广播可降到约 10 秒一条），超时必须大于插件内部扫描窗口，否则必然超时。
-    /// 该值须由实测调优（§5.3）。
+    /// <para>本值是<b>防止 Worker 挂死拖垮宿主</b>的唯一屏障：WinRT 蓝牙调用有实测
+    /// 挂起 10 秒以上的先例（见 <c>GaiaActiveReader.WithTimeout</c>），没有超时的话
+    /// 宿主会永远卡在等待 Worker 响应上，托盘菜单随之停止刷新。</para>
+    /// <para>取值依据（2026-10-27 修订）：插件的 poll 已改为「取走缓冲区后立即返回」，
+    /// 毫秒级完成，不再有 12 秒扫描窗口，因此 20 秒的旧值失去依据、也过长——
+    /// 超时过长会拖慢熔断（连续失败 3 次才触发）。实测单轮 poll 为毫秒级，
+    /// 5 秒已是上千倍余量，同时把「Worker 卡死」的发现时间从 60 秒压到 15 秒。</para>
+    /// <para>注意：Worker 启动后<b>不做阻塞式预热</b>，首个 poll 不会被拖慢；
+    /// 若将来重新引入启动预热，本值必须大于预热时长。</para>
     /// </remarks>
-    public TimeSpan PollTimeout { get; set; } = TimeSpan.FromSeconds(20);
+    public TimeSpan PollTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <summary>发现请求超时（需覆盖设备枚举耗时）。</summary>
     public TimeSpan DiscoverTimeout { get; set; } = TimeSpan.FromSeconds(15);

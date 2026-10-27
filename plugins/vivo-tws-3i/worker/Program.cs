@@ -41,8 +41,11 @@ internal static class Program
     /// </summary>
     private const int HardTimeoutMs = 80000;
 
-    /// <summary>BLE 扫描器启动后的预热时间（毫秒），用于等无线电就绪。</summary>
-    private const int ScannerWarmupMs = 2500;
+    /// <summary>BLE 扫描器启动后，判定「无线电尚未就绪」的观察窗口（毫秒）。</summary>
+    /// <remarks>
+    /// 仅用于在诊断里说明「刚启动、还没收到广播」是正常现象，而非设备真的不在。
+    /// </remarks>
+    private const int RadioPendingWindowMs = 5000;
 
     /// <summary>
     /// 最近一次成功读数的缓存。
@@ -67,6 +70,9 @@ internal static class Program
     /// </remarks>
     private static string? _lastMac;
 
+    /// <summary>Worker 启动时刻；用于判断「尚未收到广播」是否只是无线电未就绪。</summary>
+    private static DateTimeOffset _startedUtc;
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = false,
@@ -81,10 +87,13 @@ internal static class Program
         var matcher = new VivoTws3iModelMatcher(profile);
         using var scanner = new BleAdvertisementScanner(CompanyId);
 
-        // 扫描器常驻：先开启并预热，等 Windows 无线电就绪后再开始处理请求。
+        // 扫描器常驻：启动后立即开始服务请求，数据随到随收。
+        // 刻意不做阻塞式预热，原因有二：
+        //   ① 预热会把首个 poll 整体拖后，而这段等待计入宿主的 PollTimeout；
+        //   ② 预热期收到的广播若被丢弃，首个 poll 会假报「设备未找到」。
+        // Windows 无线电初始化期间收到的广播会自然落在缓冲区，不会丢失。
         scanner.Start();
-        Thread.Sleep(ScannerWarmupMs);
-        scanner.Drain();
+        _startedUtc = DateTimeOffset.UtcNow;
 
         string? inputLine;
         while ((inputLine = Console.In.ReadLine()) is not null)
@@ -338,6 +347,17 @@ internal static class Program
         // 命中率与响应速度都优于原先的固定 12 秒窗口——窗口期间到达的广播不会再被「等窗口」拖慢。
         var payloads = scanner.Drain();
         var diagnostics = new List<string>();
+
+        // 刚启动且缓冲区为空：多半是 Windows 无线电尚未就绪，不是设备真的不在。
+        // 明确写进诊断，避免用户把启动瞬间的「未找到」误当成设备离线。
+        if (payloads.Count == 0)
+        {
+            var startupMs = (DateTimeOffset.UtcNow - _startedUtc).TotalMilliseconds;
+            if (startupMs < RadioPendingWindowMs)
+            {
+                diagnostics.Add($"scanner:radioPending(startupMs={startupMs:F0})");
+            }
+        }
 
         VivoTwsAdvertisement? chosen = null;
         foreach (var payload in payloads)
