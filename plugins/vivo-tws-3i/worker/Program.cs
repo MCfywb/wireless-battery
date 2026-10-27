@@ -16,16 +16,11 @@ internal static class Program
 {
     private const ushort CompanyId = 0x0837;
 
-    /// <summary>
-    /// 单次 poll 的扫描窗口（毫秒）。
-    /// </summary>
+    /// <summary>发现（discover）命令的一次性扫描窗口（毫秒）。</summary>
     /// <remarks>
-    /// 方案建议 poll 超时 3 秒，但实测耳机的 Fast Pair 广播在连接稳定后
-    /// 会降到约 10 秒一条，3 秒窗口经常扫不到新数据（此时返回 Stale 而非未找到）。
-    /// 这里取 12 秒以提高命中率；宿主侧的超时分级由 PluginHost 负责。
+    /// 仅用于宿主显式「立即发现」时做一次快速扫面；与定时 poll 不同，
+    /// poll 不再阻塞等待窗口（见 <see cref="Poll"/>）。
     /// </remarks>
-    private const int PollScanMs = 12000;
-
     private const int DiscoverScanMs = 3000;
 
     /// <summary>
@@ -337,7 +332,11 @@ internal static class Program
 
     private static PluginResponse Poll(string requestId, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
     {
-        var payloads = Scan(scanner, PollScanMs);
+        // 持续监听：扫描器在 Worker 启动后即常驻且事件驱动，会累积所有收到的广播。
+        // Poll 只取「自上次取走以来」累积的载荷并立即返回，不再阻塞等待固定窗口。
+        // 这样每条广播最多在下一个轮询周期（宿主默认 5 秒）内被取到，
+        // 命中率与响应速度都优于原先的固定 12 秒窗口——窗口期间到达的广播不会再被「等窗口」拖慢。
+        var payloads = scanner.Drain();
         var diagnostics = new List<string>();
 
         VivoTwsAdvertisement? chosen = null;

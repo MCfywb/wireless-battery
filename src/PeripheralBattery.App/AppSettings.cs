@@ -12,7 +12,13 @@ public sealed class AppSettings
     public int Version { get; set; } = CurrentVersion;
 
     /// <summary>轮询间隔（秒）。</summary>
-    public int PollIntervalSeconds { get; set; } = 30;
+    /// <remarks>
+    /// 默认 5 秒：Worker 的 BLE 扫描器本就常驻并事件驱动累积广播，
+    /// 缩短轮询间隔可在广播到达后的下一个周期（≤5 秒）内取到，显著提升响应速度，
+    /// 且不会漏掉任何广播（未被取走的广播会留在缓冲直到下次 poll）。
+    /// 允许范围见 <see cref="Normalize"/>（5–3600）。
+    /// </remarks>
+    public int PollIntervalSeconds { get; set; } = 5;
 
     /// <summary>读数过期时间（秒）；超过则显示为过期值。</summary>
     public int StaleAfterSeconds { get; set; } = 180;
