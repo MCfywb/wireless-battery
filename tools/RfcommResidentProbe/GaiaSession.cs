@@ -93,6 +93,16 @@ internal sealed class GaiaSession : IDisposable
     private const int SdpTimeoutMs = 20000;
     private const int ConnectTimeoutMs = 15000;
     private const int HandshakeTimeoutMs = 3000;
+
+    /// <summary>设备枚举超时（对齐产品代码 <c>GaiaActiveReader.FindTimeoutMs</c>）。</summary>
+    private const int FindTimeoutMs = 10000;
+
+    /// <summary>
+    /// 按地址枚举的专用超时（对齐产品代码 <c>GaiaActiveReader.AddressFindTimeoutMs</c>）。
+    /// 设备处于连接态时该查询会挂起，4 秒即放弃转名字兜底。
+    /// </summary>
+    private const int AddressFindTimeoutMs = 4000;
+
     private const int RegisterGapMs = 1200;
     private const int SendTimeoutMs = 5000;
 
@@ -441,14 +451,18 @@ internal sealed class GaiaSession : IDisposable
     {
         if (TryParseMac(knownMac, out var address))
         {
-            var byAddress = await DeviceInformation
-                .FindAllAsync(BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(address))
-                .AsTask().ConfigureAwait(false);
-            log($"按地址枚举（{knownMac}）命中 {byAddress.Count} 个");
+            var byAddress = await WithTimeout(
+                DeviceInformation
+                    .FindAllAsync(BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(address))
+                    .AsTask(),
+                AddressFindTimeoutMs, log, "按地址枚举").ConfigureAwait(false);
+            log($"按地址枚举（{knownMac}）命中 {byAddress?.Count ?? -1} 个");
 
-            if (byAddress.Count > 0)
+            if (byAddress is { Count: > 0 })
             {
-                var device = await BluetoothDevice.FromIdAsync(byAddress[0].Id).AsTask().ConfigureAwait(false);
+                var device = await WithTimeout(
+                    BluetoothDevice.FromIdAsync(byAddress[0].Id).AsTask(),
+                    FindTimeoutMs, log, "FromIdAsync(地址)").ConfigureAwait(false);
                 if (device is not null)
                 {
                     log("  → 按地址命中");
@@ -457,25 +471,61 @@ internal sealed class GaiaSession : IDisposable
             }
         }
 
-        var all = await DeviceInformation
-            .FindAllAsync(BluetoothDevice.GetDeviceSelector())
-            .AsTask().ConfigureAwait(false);
-        log($"按名称枚举共 {all.Count} 个已配对设备");
+        var all = await WithTimeout(
+            DeviceInformation.FindAllAsync(BluetoothDevice.GetDeviceSelector()).AsTask(),
+            FindTimeoutMs, log, "按名称枚举").ConfigureAwait(false);
+        log($"按名称枚举共 {all?.Count ?? -1} 个已配对设备");
+
+        if (all is null)
+        {
+            return null;
+        }
 
         foreach (var info in all)
         {
-            if (info.Name.Contains(deviceName, StringComparison.OrdinalIgnoreCase))
+            if (!info.Name.Contains(deviceName, StringComparison.OrdinalIgnoreCase))
             {
-                var device = await BluetoothDevice.FromIdAsync(info.Id).AsTask().ConfigureAwait(false);
-                if (device is not null)
-                {
-                    log($"  → 按名称命中：{info.Name}");
-                    return device;
-                }
+                continue;
+            }
+
+            var device = await WithTimeout(
+                BluetoothDevice.FromIdAsync(info.Id).AsTask(),
+                FindTimeoutMs, log, "FromIdAsync(名称)").ConfigureAwait(false);
+            if (device is not null)
+            {
+                log($"  → 按名称命中：{info.Name}");
+                return device;
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 给没有内建超时的 WinRT 异步调用套一层超时兜底。
+    /// </summary>
+    /// <remarks>
+    /// <para><b>为什么必须加</b>：2026-10-27 首次真机测试的教训——
+    /// 重连阶段实测耗时 36.8 秒，而建链本身只花 6.8 秒，差的 <b>30 秒是设备枚举在挂起</b>。
+    /// <c>DeviceInformation.FindAllAsync</c> 与 <c>BluetoothDevice.FromIdAsync</c> 没有内建超时，
+    /// 耳机刚断电/刚上电时尤其容易长时间不返回。产品代码 <c>GaiaActiveReader</c> 每一处都包了
+    /// 超时（<c>AddressFindTimeoutMs</c> / <c>FindTimeoutMs</c>），本探针此前漏了，
+    /// 导致「首次重连耗时」这个指标被枚举挂起污染、不可用。</para>
+    /// <para>超时只观察、不取消底层任务（取消会让底层流被释放，产生二次异常）；
+    /// 超时即返回 <c>default</c> 并在日志里留痕。</para>
+    /// </remarks>
+    private static async Task<T?> WithTimeout<T>(
+        Task<T> task, int ms, Action<string> log, string label)
+    {
+        var delay = Task.Delay(ms);
+        var completed = await Task.WhenAny(task, delay).ConfigureAwait(false);
+        if (completed != task)
+        {
+            log($"  {label} 超时（{ms} ms）");
+            return default;
+        }
+
+        return await task.ConfigureAwait(false);
     }
 
     /// <summary>把 <c>XX:XX:XX:XX:XX:XX</c> 解析为 48 位大端整数。</summary>

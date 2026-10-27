@@ -156,9 +156,13 @@ internal static class Program
         var holdSegment = new SegmentInfo { DurationSec = options.HoldSec };
         var holdStart = DateTimeOffset.UtcNow;
 
-        using var holdCts = new CancellationTokenSource();
+        // 读循环贯穿「保持段」与「合盖段」——断连只有持续读 socket 才能被发现。
+        // （2026-10-27 首次测试的教训：若保持段结束时就把读循环取消，
+        //   合盖段便再无人读 socket，断连永远检测不到，会被误记为「socket 静默挂死」
+        //   并当成耳机的行为——实为探针自身的缺陷。）
+        using var sessionCts = new CancellationTokenSource();
         var readTask = session.ReadLoopAsync(
-            frame => OnFrame(frame, holdSegment, holdStart), holdCts.Token);
+            frame => OnFrame(frame, holdSegment, holdStart), sessionCts.Token);
 
         var heartbeat = new Heartbeat(TimeSpan.FromSeconds(5), () => Console.WriteLine(
             $"  --- 心跳 t={(DateTimeOffset.UtcNow - holdStart).TotalSeconds:F0}s"
@@ -173,11 +177,14 @@ internal static class Program
         {
             disconnect = await readTask.ConfigureAwait(false);
         }
-        else
+        else if (!options.PowerCycle)
         {
-            await holdCts.CancelAsync().ConfigureAwait(false);
+            // 不做合盖环节：读循环到此为止。
+            await sessionCts.CancelAsync().ConfigureAwait(false);
             await readTask.ConfigureAwait(false);
         }
+
+        // 启用合盖环节且保持段内未断：读循环继续跑，交由阶段 4 等待断连。
 
         heartbeat.Dispose();
 
@@ -210,10 +217,13 @@ internal static class Program
         // ---------- 阶段 4/5：合盖断电与重连 ----------
         if (options.PowerCycle)
         {
-            var cycle = new PowerCycleInfo
-            {
-                PresenceTransitions = holdSegment.PresenceTransitions,
-            };
+            var cycle = new PowerCycleInfo();
+
+            // 合盖/开盖期间持续采样系统蓝牙状态：
+            // 「耳机断电后 ConnectionStatus 何时翻转」是断连检测的另一条独立证据，
+            // 也是将来产品侧做「系统蓝牙状态判定在线」的直接依据。
+            var cyclePresence = new PresenceSampler(device, TimeSpan.FromSeconds(options.SampleIntervalSec));
+            cyclePresence.Start();
 
             if (disconnect is not null)
             {
@@ -223,15 +233,19 @@ internal static class Program
             else
             {
                 Console.WriteLine("=== 阶段 4：请现在合上充电盒盖（耳机断电），观察 socket 何时断 ===");
-                Console.WriteLine($"    最多等待 {options.PowerCycleWaitSec} 秒");
+                Console.WriteLine($"    最多等待 {options.PowerCycleWaitSec} 秒（程序持续读 socket 等待断连）");
                 Console.WriteLine();
 
-                var waitWatch = Stopwatch.StartNew();
                 var deadline = DateTimeOffset.Now.AddSeconds(options.PowerCycleWaitSec);
-
-                while (disconnect is null && DateTimeOffset.Now < deadline)
+                while (DateTimeOffset.Now < deadline)
                 {
-                    await Task.Delay(200).ConfigureAwait(false);
+                    if (readTask.IsCompleted)
+                    {
+                        disconnect = await readTask.ConfigureAwait(false);
+                        break;
+                    }
+
+                    await Task.Delay(500).ConfigureAwait(false);
                 }
 
                 if (disconnect is not null)
@@ -240,6 +254,9 @@ internal static class Program
                 }
                 else
                 {
+                    // 超时仍未断：记录为「静默挂死」，并收掉读循环。
+                    await sessionCts.CancelAsync().ConfigureAwait(false);
+                    await readTask.ConfigureAwait(false);
                     cycle.DisconnectDetected = false;
                     cycle.DisconnectReason = "timeout";
                     Console.WriteLine($"  ✗ {options.PowerCycleWaitSec} 秒内没有检测到断连"
@@ -252,6 +269,15 @@ internal static class Program
             // ---------- 阶段 5：开盖重连 ----------
             Console.WriteLine("=== 阶段 5：请现在打开充电盒盖（耳机通电），观察能否自动重连 ===");
             Console.WriteLine();
+
+            // 必须先释放旧 socket 再重连。
+            // 实测（2026-10-27）：阶段 4 未检测到断连时旧 socket 仍然存活，
+            // 此时直接重连会被系统拒绝——
+            //   COMException「通常每个套接字地址(协议/网络地址/端口)只允许使用一次」。
+            // 即 Windows 上一台设备的同一 RFCOMM 通道同时只允许一个 socket。
+            // 这是常驻连接的设计约束：重连逻辑必须「先释放旧会话，再建立新会话」，
+            // 不能指望靠新建连接把旧的顶掉。
+            session.Dispose();
 
             var reconnectWatch = Stopwatch.StartNew();
             var attempt = 0;
@@ -293,6 +319,21 @@ internal static class Program
             if (!cycle.ReconnectSucceeded)
             {
                 Console.WriteLine($"  ✗ {options.ReconnectWaitSec} 秒内未能重连");
+            }
+
+            await cyclePresence.DisposeAsync().ConfigureAwait(false);
+            cycle.PresenceTransitions = cyclePresence.Transitions.ToList();
+            if (cycle.PresenceTransitions.Count > 0)
+            {
+                Console.WriteLine("  合盖/开盖期间的系统蓝牙状态变化：");
+                foreach (var transition in cycle.PresenceTransitions)
+                {
+                    Console.WriteLine($"    - [{transition.SecondsSinceStart:F1}s] {transition.From} → {transition.To}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("  合盖/开盖期间系统蓝牙状态：无变化记录");
             }
 
             report.PowerCycle = cycle;
