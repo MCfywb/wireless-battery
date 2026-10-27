@@ -59,8 +59,11 @@ internal sealed class SegmentInfo
     /// <summary>收到的各类帧计数。</summary>
     public Dictionary<string, int> FramesByCommand { get; set; } = new(StringComparer.Ordinal);
 
-    /// <summary>电量帧明细。</summary>
+    /// <summary>电量帧明细（含原始载荷）。</summary>
     public List<BatterySample> BatteryFrames { get; set; } = [];
+
+    /// <summary>佩戴帧明细（含原始载荷）。</summary>
+    public List<WearSample> WearSamples { get; set; } = [];
 
     /// <summary>佩戴帧数量。</summary>
     public int WearFrames { get; set; }
@@ -108,13 +111,33 @@ internal sealed record TelemetryAudioStateChange(
 /// <param name="Right">右耳电量（0xFF 表示未知）。</param>
 /// <param name="Case">充电盒电量（0xFF 表示未知）。</param>
 /// <param name="ChargeBits">充电位字节。</param>
+/// <param name="RawPayload">
+/// 原始载荷十六进制。
+/// <b>为什么必须存原值</b>：2026-10-27 首次测试发现盒电量会在 <c>94</c> 与 <c>0xFF</c> 之间
+/// 成段跳变，只存解码后的值无法判断成因（是载荷结构不同，还是设备真在报未知），
+/// 必须保留原始字节供离线比对。
+/// </param>
 internal sealed record BatterySample(
     DateTimeOffset At,
     double SecondsSinceStart,
     int Left,
     int Right,
     int Case,
-    int ChargeBits);
+    int ChargeBits,
+    string RawPayload);
+
+/// <summary>
+/// 一帧佩戴状态（<c>0x820D</c>）读数。
+/// </summary>
+/// <remarks>
+/// 记录它同样是为了解释盒电量的跳变：佩戴/开合状态与 <c>0x8207</c> 的盒值几乎一一配对，
+/// 把两路原始载荷按时间对齐比对，才能判断跳变是随状态变化还是随机。
+/// </remarks>
+internal sealed record WearSample(
+    DateTimeOffset At,
+    double SecondsSinceStart,
+    string StateHex,
+    string RawPayload);
 
 /// <summary>合盖/开盖环节的结果。</summary>
 internal sealed class PowerCycleInfo

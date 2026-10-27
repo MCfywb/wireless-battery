@@ -375,6 +375,8 @@ internal static class Program
             }
         }
 
+        ReportCaseVsWear(holdSegment);
+
         report.Notes.Add("自动检测覆盖：经典蓝牙链路状态、音频端点/声卡状态变化、耳机自报音频链路状态（A2dp/Sco/Mute）。");
         report.Notes.Add("音频卡顿/断音属亚秒级问题，本工具不自动判定，需人工听感结论（见控制台时间线）。");
         report.Notes.Add("0x8509 时间请求已自动应答——常驻连接必须实现，否则耳机可能停止继续交互。");
@@ -405,13 +407,21 @@ internal static class Program
                     frame.Payload.Length > 1 ? frame.Payload[1] : -1,
                     frame.Payload.Length > 2 ? frame.Payload[2] : -1,
                     frame.Payload.Length > 3 ? frame.Payload[3] : -1,
-                    frame.Payload.Length > 4 ? frame.Payload[4] : -1));
-                Console.WriteLine($"  [{frame.SecondsSinceConnect:F1}s] ★ 电量帧 {frame.Summary}");
+                    frame.Payload.Length > 4 ? frame.Payload[4] : -1,
+                    Convert.ToHexString(frame.Payload)));
+                Console.WriteLine($"  [{frame.SecondsSinceConnect:F1}s] ★ 电量帧 {frame.Summary}"
+                    + $" 原始={Convert.ToHexString(frame.Payload)}");
                 break;
 
             case GaiaFrameKind.Wear:
                 segment.WearFrames++;
-                Console.WriteLine($"  [{frame.SecondsSinceConnect:F1}s] 佩戴帧 {frame.Summary}");
+                segment.WearSamples.Add(new WearSample(
+                    frame.At,
+                    Math.Round((frame.At - segmentStart).TotalSeconds, 2),
+                    frame.Payload.Length > 1 ? $"0x{frame.Payload[1]:X2}" : "?",
+                    Convert.ToHexString(frame.Payload)));
+                Console.WriteLine($"  [{frame.SecondsSinceConnect:F1}s] 佩戴帧 {frame.Summary}"
+                    + $" 原始={Convert.ToHexString(frame.Payload)}");
                 break;
 
             case GaiaFrameKind.Telemetry:
@@ -485,6 +495,48 @@ internal static class Program
 
         Console.WriteLine($"  [{frame.SecondsSinceConnect:F1}s] 遥测帧：音频链路 A2dp/Sco/Mute {before} → {state}"
             + $"（电量={sample.BatteryCsv ?? "?"} 固件={sample.Firmware ?? "?"}）");
+    }
+
+    /// <summary>
+    /// 把盒电量按「当时最近的佩戴状态」分组统计，用于判断 <c>94</c> / <c>0xFF</c> 跳变的成因。
+    /// </summary>
+    /// <remarks>
+    /// 首次测试发现盒电量成段跳变（36 帧里 19 帧报 94、17 帧报 0xFF）。
+    /// 若跳变与佩戴/开合状态相关，各类佩戴态下的「有值 / 未知」比例应当明显倾斜；
+    /// 若各态比例接近，则说明跳变与状态无关，得往载荷结构差别的方向查。
+    /// </remarks>
+    private static void ReportCaseVsWear(SegmentInfo segment)
+    {
+        if (segment.BatteryFrames.Count == 0)
+        {
+            return;
+        }
+
+        Console.WriteLine("  盒电量 × 佩戴态 交叉统计（用于判断 94 / 0xFF 跳变成因）：");
+
+        // 每帧电量取「不晚于它」的最后一帧佩戴态作为当时状态。
+        var rows = new Dictionary<string, (int Known, int Unknown)>(StringComparer.Ordinal);
+        foreach (var battery in segment.BatteryFrames)
+        {
+            var state = segment.WearSamples
+                .Where(w => w.SecondsSinceStart <= battery.SecondsSinceStart)
+                .Select(w => w.StateHex)
+                .LastOrDefault() ?? "(尚无佩戴帧)";
+
+            if (!rows.TryGetValue(state, out var counts))
+            {
+                counts = (Known: 0, Unknown: 0);
+            }
+
+            rows[state] = battery.Case is >= 0 and <= 100
+                ? (counts.Known + 1, counts.Unknown)
+                : (counts.Known, counts.Unknown + 1);
+        }
+
+        foreach (var (state, counts) in rows.OrderBy(r => r.Key, StringComparer.Ordinal))
+        {
+            Console.WriteLine($"    - 佩戴态 {state}：盒有值 {counts.Known} 次 / 盒未知 {counts.Unknown} 次");
+        }
     }
 
     private static void FillDisconnect(PowerCycleInfo cycle, DisconnectInfo disconnect)
