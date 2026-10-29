@@ -87,6 +87,17 @@ public sealed class PluginCapabilities
     public bool ReportsPresence { get; set; }
 
     /// <summary>
+    /// 插件是否维持<b>常驻连接</b>（宿主无需干预，插件自己在后台建链并保持）。
+    /// </summary>
+    /// <remarks>
+    /// 为 <c>true</c> 时，插件会在读数中持续给出设备自发推送的数值，
+    /// 宿主应正常展示（即实时更新），详见 D-012。
+    /// 常驻连接仍属<b>只读</b>：只接收设备主动上报，不下发状态变更类命令。
+    /// </remarks>
+    [JsonPropertyName("residentConnection")]
+    public bool ResidentConnection { get; set; }
+
+    /// <summary>
     /// 是否支持按需主动读取（<see cref="PluginSdk.PluginMethods.ActiveRead"/>）。
     /// </summary>
     /// <remarks>按 D-010：宿主只在用户显式点击「立即刷新」时调用。</remarks>
