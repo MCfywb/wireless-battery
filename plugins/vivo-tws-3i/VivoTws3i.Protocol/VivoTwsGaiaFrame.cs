@@ -62,6 +62,19 @@ public static class VivoTwsGaiaFrameReader
     /// <summary>vivo 私有电量/埋点域。</summary>
     public const int VendorVivo = 0x001B;
 
+    /// <summary>
+    /// 设备索要时间的请求（设备 → 主机）。
+    /// </summary>
+    /// <remarks>
+    /// 上游 probe 注明「必须应答，否则它可能不继续交互」，故常驻会话必须实现应答。
+    /// 注：2026-10-30 两次常驻测试（180 秒与 60 秒）中本命令<b>均未出现</b>，
+    /// 属防御性实现——宁可多答，不可因为漏答而丢掉会话。
+    /// </remarks>
+    public const int CommandTimeRequest = 0x8509;
+
+    /// <summary>时间应答（主机 → 设备），载荷 7 字节纯二进制。</summary>
+    public const int CommandTimeResponse = 0x0509;
+
     /// <summary>构造一帧。</summary>
     /// <param name="version">协议版本。</param>
     /// <param name="vendor">厂商域。</param>

@@ -30,7 +30,8 @@
     "requiresAdministrator": false,
     "usesNetwork": false,
     "activeRead": true,
-    "reportsPresence": true
+    "reportsPresence": true,
+    "residentConnection": true
   },
   "verification": {
     "status": "hardware-verified",

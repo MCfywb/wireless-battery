@@ -41,6 +41,9 @@ internal static class Program
     /// </summary>
     private const int HardTimeoutMs = 80000;
 
+    /// <summary>常驻会话读数的数据来源标识。</summary>
+    private const string ResidentSource = "GAIA-RFCOMM:0x8207:resident";
+
     /// <summary>BLE 扫描器启动后，判定「无线电尚未就绪」的观察窗口（毫秒）。</summary>
     /// <remarks>
     /// 仅用于在诊断里说明「刚启动、还没收到广播」是正常现象，而非设备真的不在。
@@ -97,6 +100,11 @@ internal static class Program
     /// <summary>系统蓝牙状态探针（后台采样 + 去抖）。</summary>
     private static BluetoothPresenceProbe? _presence;
 
+    /// <summary>
+    /// 常驻 RFCOMM（GAIA）会话：启动即建链并保持，持续接收设备自发推送。
+    /// </summary>
+    private static GaiaResidentSession? _resident;
+
     /// <summary>Worker 启动时刻；用于判断「尚未收到广播」是否只是无线电未就绪。</summary>
     private static DateTimeOffset _startedUtc;
 
@@ -120,6 +128,11 @@ internal static class Program
         //   ② 预热期收到的广播若被丢弃，首个 poll 会假报「设备未找到」。
         // Windows 无线电初始化期间收到的广播会自然落在缓冲区，不会丢失。
         scanner.Start();
+        if (!scanner.IsRunning && scanner.StartError is not null)
+        {
+            // BLE 无线电当前不可用：不致命，常驻 RFCOMM 与状态探针仍可用。
+            Console.Error.WriteLine($"[warn] {scanner.StartError}");
+        }
         _startedUtc = DateTimeOffset.UtcNow;
 
         // 系统蓝牙状态探针：后台采样 ConnectionStatus，补上「连着本机放歌时广播被压制」的盲区。
@@ -130,6 +143,11 @@ internal static class Program
             TimeSpan.FromMilliseconds(PresenceSampleIntervalMs),
             TimeSpan.FromMilliseconds(PresenceDebounceMs));
         _presence.Start();
+
+        // 常驻 RFCOMM 会话：建链、断连检测、退避重连由它自己管；
+        // 是否该建链则交给在线判定（设备不在就别盲目重试）。
+        _resident = new GaiaResidentSession(name, ComputePresent);
+        _resident.Start();
 
         string? inputLine;
         while ((inputLine = Console.In.ReadLine()) is not null)
@@ -174,8 +192,10 @@ internal static class Program
             }
         }
 
-        // stdin 关闭（宿主退出 / shutdown）：先停探针再退出，避免后台采样任务残留在进程退出路径上。
+        // stdin 关闭（宿主退出 / shutdown）：先停探针与常驻会话，
+        // 避免后台任务与已建立的 RFCOMM 连接残留在进程退出路径上。
         _presence?.Dispose();
+        _resident?.Dispose();
 
         return 0;
     }
@@ -194,6 +214,8 @@ internal static class Program
                 return Discover(request.RequestId, matcher, scanner);
 
             case PluginMethods.Poll:
+                // BLE 无线电若在启动后才可用，此处顺带恢复扫描（无代价）。
+                scanner.TryRecover();
                 return await Poll(request.RequestId, matcher, scanner).ConfigureAwait(false);
 
             case PluginMethods.ActiveRead:
@@ -250,6 +272,36 @@ internal static class Program
             knownMac = request.DeviceId.Substring(3);
         }
 
+        // 常驻会话已连接时不可另建连接：同一设备的同一 RFCOMM 通道只允许一个 socket，
+        // 新建必然被系统拒绝（实测 COMException「通常每个套接字地址…只允许使用一次」）。
+        // 因此复用常驻会话的最新帧——顺带把「立即刷新」从约 6.8 秒变成瞬间返回。
+        if (_resident?.State == ResidentSessionState.Connected)
+        {
+            var residentBattery = _resident.Latest;
+            if (residentBattery is null)
+            {
+                return Error(requestId, PluginErrorCodes.NoFreshReport,
+                    "常驻会话已连接，但耳机自连接以来尚未推送电量帧；"
+                    + "0x8207 只在状态变化时推送，可取出/放回耳机制造一次状态变化后再试");
+            }
+
+            var residentName = matcher.GetDisplayName(matcher.Profile.ModelIds.FirstOrDefault());
+            return new PluginResponse
+            {
+                RequestId = requestId,
+                Ok = true,
+                Readings =
+                [
+                    ResidentReading(residentBattery, residentName, "leftEarbud",
+                        residentBattery.Left, null, true),
+                    ResidentReading(residentBattery, residentName, "rightEarbud",
+                        residentBattery.Right, null, true),
+                    ResidentReading(residentBattery, residentName, "chargingCase",
+                        residentBattery.Case, residentBattery.CaseCharging, true),
+                ],
+            };
+        }
+
         // 硬上限：即便某步 WinRT 调用意外挂死（设备处于不可查询状态），
         // 也必须在宿主 90s 超时前返回可控错误，而不是让 UI 干等。
         var readTask = GaiaActiveReader
@@ -303,6 +355,11 @@ internal static class Program
         if (_presence is not null && result.DeviceId is { Length: > 3 } id)
         {
             await _presence.SetKnownMacAsync(id.Substring(3)).ConfigureAwait(false);
+        }
+
+        if (_resident is not null && result.DeviceId is { Length: > 3 } residentId)
+        {
+            _resident.SetKnownMac(residentId.Substring(3));
         }
 
         return new PluginResponse
@@ -463,11 +520,49 @@ internal static class Program
                 await _presence.SetKnownMacAsync(_lastMac).ConfigureAwait(false);
             }
 
+            // 常驻会话同样改用按地址匹配（首帧广播后才有 MAC，此前走名字兜底）。
+            _resident?.SetKnownMac(_lastMac);
+
             break;
+        }
+
+        // 常驻会话的诊断（连接/断连/重连）一并带回，便于在诊断窗口里看到它的状态。
+        if (_resident is not null)
+        {
+            diagnostics.AddRange(_resident.DrainDiagnostics());
         }
 
         if (chosen is null)
         {
+            // 常驻会话有电量时优先用它：这是真实的实时数据，
+            // 且正是「连着本机放歌时 BLE 广播被压制」场景下的唯一数据源。
+            if (_resident?.Latest is { } residentBattery
+                && _resident.State == ResidentSessionState.Connected)
+            {
+                var stalePresent = ComputePresent();
+                var residentDeviceName = matcher.GetDisplayName(matcher.Profile.ModelIds.FirstOrDefault());
+                var residentReadings = new List<PluginReading>
+                {
+                    ResidentReading(residentBattery, residentDeviceName, "leftEarbud",
+                        residentBattery.Left, null, stalePresent),
+                    ResidentReading(residentBattery, residentDeviceName, "rightEarbud",
+                        residentBattery.Right, null, stalePresent),
+                    ResidentReading(residentBattery, residentDeviceName, "chargingCase",
+                        residentBattery.Case, residentBattery.CaseCharging, stalePresent),
+                };
+
+                _lastReadings = residentReadings;
+                _lastSuccessUtc = DateTimeOffset.UtcNow;
+
+                return new PluginResponse
+                {
+                    RequestId = requestId,
+                    Ok = true,
+                    Readings = residentReadings,
+                    Diagnostics = diagnostics,
+                };
+            }
+
             // 广播频率可能极低：若有历史成功读数，按 §4.2 返回 Stale 而非「未找到」。
             if (_lastReadings is not null && _lastSuccessUtc is not null)
             {
@@ -574,6 +669,33 @@ internal static class Program
             DiagnosticCode = diagnosticCode,
         };
     }
+
+    /// <summary>构造一条来自常驻会话的读数。</summary>
+    /// <remarks>
+    /// 与主动读取路径产出<b>同一个 deviceId</b>，保证宿主把两路读数归并到同一台设备；
+    /// 只在来源标识上区分（<c>:resident</c>），便于诊断时看清数据是哪条路来的。
+    /// </remarks>
+    private static PluginReading ResidentReading(
+        ResidentBattery battery,
+        string deviceName,
+        string component,
+        int? percentage,
+        bool? charging,
+        bool? present)
+        => new()
+        {
+            DeviceId = battery.DeviceId,
+            DeviceName = deviceName,
+            Component = component,
+            Percentage = percentage,
+            Charging = charging,
+            Connected = _presence?.StableConnected,
+            Present = present,
+            Quality = percentage is null
+                ? nameof(ReadingQuality.Unavailable)
+                : nameof(ReadingQuality.Reported),
+            Source = ResidentSource,
+        };
 
     /// <summary>
     /// 连接态取值：优先用系统蓝牙连接态（去抖后），未判定时回退广播自带的连接位。

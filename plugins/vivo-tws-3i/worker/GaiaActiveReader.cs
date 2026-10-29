@@ -22,10 +22,10 @@ namespace VivoTws3i.Worker;
 internal static class GaiaActiveReader
 {
     /// <summary>vivo 私有 RFCOMM 服务 UUID。</summary>
-    private const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
+    internal const string VivoPrivateUuid = "00000837-d102-11e1-9b23-00025b00a5a5";
 
     /// <summary>握手用版本：本机实测握手必须用 v4（v3 无响应）。</summary>
-    private const int HandshakeVersion = 4;
+    internal const int HandshakeVersion = 4;
 
     private const int SdpTimeoutMs = 20000;
     private const int ConnectTimeoutMs = 15000;
@@ -39,9 +39,9 @@ internal static class GaiaActiveReader
     private const int AddressFindTimeoutMs = 4000;
 
     private const int SendTimeoutMs = 5000;
-    private const int HandshakeResponseMs = 3000;
+    internal const int HandshakeResponseMs = 3000;
     // 对齐参考探针 E2：每条注册命令间隔 1.2s，给设备足够处理时间（避免 ACK 漏收）。
-    private const int RegisterGapMs = 1200;
+    internal const int RegisterGapMs = 1200;
 
     /// <summary>主动读取结果。</summary>
     /// <param name="Ok">是否取得电量帧。</param>
@@ -216,7 +216,7 @@ internal static class GaiaActiveReader
         }
     }
 
-    private static async Task<BluetoothDevice?> FindDeviceAsync(
+    internal static async Task<BluetoothDevice?> FindDeviceAsync(
         string deviceName, string? knownMac, List<string> diagnostics)
     {
         // 主路径：用被动广播已探明的 MAC 精确匹配。
@@ -324,7 +324,7 @@ internal static class GaiaActiveReader
     /// <para>超时只观察、不取消底层任务（取消会让底层流被释放，产生二次异常）；
     /// 超时即返回 <c>default</c> 并在诊断里留痕，由调用方降级处理。</para>
     /// </remarks>
-    private static async Task<T?> WithTimeout<T>(
+    internal static async Task<T?> WithTimeout<T>(
         Task<T> task, int ms, List<string> diagnostics, string label)
     {
         var delay = Task.Delay(ms);
@@ -338,7 +338,7 @@ internal static class GaiaActiveReader
         return await task.ConfigureAwait(false);
     }
 
-    private static async Task<StreamSocket?> ConnectAsync(
+    internal static async Task<StreamSocket?> ConnectAsync(
         BluetoothDevice device, List<string> diagnostics)
     {
         diagnostics.Add($"active:connectionStatus={device.ConnectionStatus}");
@@ -386,7 +386,7 @@ internal static class GaiaActiveReader
         }
     }
 
-    private static async Task SendAsync(DataWriter writer, byte[] payload, List<string> diagnostics)
+    internal static async Task SendAsync(DataWriter writer, byte[] payload, List<string> diagnostics)
     {
         writer.WriteBytes(payload);
         var store = writer.StoreAsync().AsTask();
@@ -419,7 +419,7 @@ internal static class GaiaActiveReader
     /// WinRT 的 <see cref="DataReader"/> 不允许同时存在多个挂起的 <c>LoadAsync</c>
     /// （否则报 COMException 0x800710DD），故任何时刻至多保留一个挂起读。
     /// </remarks>
-    private sealed class SocketReader : IDisposable
+    internal sealed class SocketReader : IDisposable
     {
         private readonly DataReader _reader;
         private Task<uint>? _pending;
@@ -428,9 +428,60 @@ internal static class GaiaActiveReader
         public SocketReader(IInputStream inputStream)
             => _reader = new DataReader(inputStream) { InputStreamOptions = InputStreamOptions.Partial };
 
-        /// <summary>等待并取回一段数据；超时返回空。</summary>
-        public async Task<byte[]> CollectAsync(int timeoutMs, CancellationToken cancellationToken)
+    /// <summary>
+    /// 读取一段数据，并区分「超时」与「对端关闭」。
+    /// </summary>
+    /// <remarks>
+    /// <para><b>为什么需要它</b>：<see cref="CollectAsync"/> 把超时与读到 0 字节都返回空数组，
+    /// 二者无法区分。常驻会话<b>必须</b>区分——实测（协议笔记 §23.2）耳机断电时
+    /// socket 正是以「读到 0 字节」结束，这是判定断连的主要依据；
+    /// 若与超时混淆，就只能靠超时兜底，检测会晚很多。</para>
+    /// <para>本方法为新增，不改动 <see cref="CollectAsync"/>，
+    /// 已验证的主动读取路径行为不变。</para>
+    /// </remarks>
+    public async Task<byte[]?> ReadAsync(int timeoutMs, CancellationToken cancellationToken)
+    {
+        if (_disposed)
         {
+            return null;
+        }
+
+        _pending ??= _reader.LoadAsync(4096).AsTask();
+
+        var delay = Task.Delay(timeoutMs, cancellationToken);
+        var finished = await Task.WhenAny(_pending, delay).ConfigureAwait(false);
+        if (finished != _pending)
+        {
+            // 超时：保留挂起读，下次继续等待同一个任务。
+            return null;
+        }
+
+        uint loaded;
+        try
+        {
+            loaded = await _pending.ConfigureAwait(false);
+        }
+        catch
+        {
+            _pending = null;
+            throw;
+        }
+
+        _pending = null;
+
+        if (loaded == 0)
+        {
+            throw new EndOfStreamException("对端关闭连接：socket 输入流读到 0 字节");
+        }
+
+        var buffer = new byte[loaded];
+        _reader.ReadBytes(buffer);
+        return buffer;
+    }
+
+    /// <summary>在给定时间窗内读取并拼接全部数据。</summary>
+    public async Task<byte[]> CollectAsync(int timeoutMs, CancellationToken cancellationToken)
+    {
             if (_disposed)
             {
                 return [];
