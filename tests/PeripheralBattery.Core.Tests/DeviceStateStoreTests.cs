@@ -18,7 +18,8 @@ public sealed class DeviceStateStoreTests
         bool? charging = null,
         string deviceId = "bt:test",
         string deviceName = "测试设备",
-        string? diagnostic = null)
+        string? diagnostic = null,
+        bool? present = null)
         => new(
             deviceId,
             deviceName,
@@ -31,7 +32,8 @@ public sealed class DeviceStateStoreTests
             Now,
             quality == ReadingQuality.Reported ? Now : null,
             "TEST-SOURCE",
-            diagnostic);
+            diagnostic,
+            present);
 
     [Fact]
     public void Null百分比与零百分比必须区分()
@@ -149,15 +151,60 @@ public sealed class DeviceStateStoreTests
         Assert.NotNull(component.LastSuccessfulReadUtc);
     }
 
+    /// <summary>
+    /// 判定离线即移除条目。
+    /// </summary>
+    /// <remarks>
+    /// 用户已确认「判定离线即从列表消失」。此前状态库只增不减，设备走了也一直占位。
+    /// </remarks>
     [Fact]
-    public void 断开连接后不得继续标记为实时值()
+    public void 判定离线后移除设备条目()
     {
         var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
 
-        store.Apply([Reading(BatteryComponent.LeftEarbud, 80, connected: false)], Now);
+        store.Apply([Reading(BatteryComponent.LeftEarbud, 80)], Now);
+        Assert.NotNull(store.GetDevice("bt:test"));
+
+        var changed = store.Apply([Reading(BatteryComponent.LeftEarbud, 80, present: false)], Now);
+
+        Assert.True(changed);
+        Assert.Null(store.GetDevice("bt:test"));
+    }
+
+    /// <summary>
+    /// 插件未作在线判定（<c>present</c> 为 null）时，不得移除、不得降级。
+    /// </summary>
+    /// <remarks>兼容既有插件：不返回该字段就必须保持原有行为。</remarks>
+    [Fact]
+    public void 未作在线判定时保持原行为()
+    {
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+
+        store.Apply([Reading(BatteryComponent.LeftEarbud, 80, present: null)], Now);
 
         var component = store.GetDevice("bt:test")!.Get(BatteryComponent.LeftEarbud)!;
-        Assert.NotEqual(ReadingQuality.Reported, component.Quality);
+        Assert.Equal(ReadingQuality.Reported, component.Quality);
+        Assert.Equal(80, component.Percentage);
+    }
+
+    /// <summary>
+    /// 回归护栏：未与本机连接但<b>仍在线</b>的设备，不得被误降级为过期。
+    /// </summary>
+    /// <remarks>
+    /// 接入系统蓝牙状态后 <c>IsConnected</c> 指「与本机是否保持经典蓝牙连接」。
+    /// 设备完全可能未连本机、却仍通过 BLE 广播正常供数；
+    /// 若把「未连接」当成「离线」，这类设备会被成批误降级。
+    /// </remarks>
+    [Fact]
+    public void 未连本机但在线时不得降级为过期()
+    {
+        var store = new DeviceStateStore(TimeSpan.FromMinutes(3));
+
+        store.Apply([Reading(BatteryComponent.LeftEarbud, 80, connected: false, present: true)], Now);
+
+        var component = store.GetDevice("bt:test")!.Get(BatteryComponent.LeftEarbud)!;
+        Assert.Equal(ReadingQuality.Reported, component.Quality);
+        Assert.Equal(80, component.Percentage);
     }
 
     [Fact]

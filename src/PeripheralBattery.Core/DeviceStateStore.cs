@@ -44,6 +44,11 @@ public sealed class DeviceStateStore
     /// <param name="readings">待应用的读数。</param>
     /// <param name="now">当前时刻。</param>
     /// <returns>是否有实质变化（数值/质量/状态改变）。观测时间推进不算实质变化，避免 UI 频繁重建。</returns>
+    /// <remarks>
+    /// 若某条读数带 <c>IsPresent == false</c>（插件明确判定该设备已离线），
+    /// 则<b>移除</b>该设备条目而不是写入读数——用户已确认「判定离线即从列表消失」。
+    /// 插件未作判定（<c>null</c>）时保持原有行为，不做移除。
+    /// </remarks>
     public bool Apply(IEnumerable<BatteryReading> readings, DateTimeOffset now)
     {
         ArgumentNullException.ThrowIfNull(readings);
@@ -51,8 +56,21 @@ public sealed class DeviceStateStore
         lock (_gate)
         {
             var changed = false;
+
             foreach (var reading in readings)
             {
+                // 离线判定优先于一切：设备已走，就不该继续占着一个条目。
+                if (reading.IsPresent == false)
+                {
+                    if (_devices.Remove(reading.DeviceId))
+                    {
+                        _diagnostics.Add($"设备已离线，移除条目：{reading.DeviceId}");
+                        changed = true;
+                    }
+
+                    continue;
+                }
+
                 if (ApplyCore(reading, now))
                 {
                     changed = true;
@@ -60,6 +78,19 @@ public sealed class DeviceStateStore
             }
 
             return changed;
+        }
+    }
+
+    /// <summary>
+    /// 移除单个设备条目。
+    /// </summary>
+    /// <param name="deviceId">设备标识。</param>
+    /// <returns>是否确实移除了（原本存在才返回 true）。</returns>
+    public bool RemoveDevice(string deviceId)
+    {
+        lock (_gate)
+        {
+            return _devices.Remove(deviceId);
         }
     }
 
@@ -263,8 +294,12 @@ public sealed class DeviceStateStore
             quality = ReadingQuality.Unavailable;
         }
 
-        // 断开连接的设备不得继续把旧数值当作实时值（§4.2）。
-        if (reading.IsConnected == false && quality == ReadingQuality.Reported)
+        // 已判定离线的设备不得继续把旧数值当作实时值（§4.2）。
+        // 注意判据必须用「是否在线」而不是「是否连接」：
+        // 接入系统蓝牙状态后 IsConnected 指「与本机是否保持经典蓝牙连接」，
+        // 而设备完全可能未连本机、却仍通过 BLE 广播正常供数——
+        // 若沿用旧判据，这类设备会被误降级成 Stale（回归）。
+        if (reading.IsPresent == false && quality == ReadingQuality.Reported)
         {
             quality = ReadingQuality.Stale;
         }

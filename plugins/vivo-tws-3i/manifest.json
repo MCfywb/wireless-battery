@@ -29,7 +29,8 @@
     "readOnly": true,
     "requiresAdministrator": false,
     "usesNetwork": false,
-    "activeRead": true
+    "activeRead": true,
+    "reportsPresence": true
   },
   "verification": {
     "status": "hardware-verified",
@@ -39,6 +40,6 @@
     "testedFirmware": [
       "2.19.7_2.19.7"
     ],
-    "notes": "取数路径为 BLE 广播被动监听（只读、零连接、零写入）。已取得可重复的原始样本，并于 2026-10-26 完成与官方 vivo TWS App 的实机交叉验证：官方 App 显示 左 89 / 右 80 / 盒 100，本插件的 BLE 广播通道与 GAIA 0x8207 通道在同一时刻给出完全相同的三个数值，逐值一致。测试环境：Windows 10 Home China 26H2（build 26300.9711），设备固件 2.19.7_2.19.7，GAIA 版本 3.3.1，连接方式 BLE 广播被动监听 + RFCOMM 私有通道。已知限制：同系列长续航版 model 144/145 未实测，不在支持列表内。"
+    "notes": "取数路径为 BLE 广播被动监听（只读、零连接、零写入）。已取得可重复的原始样本，并于 2026-10-26 完成与官方 vivo TWS App 的实机交叉验证：官方 App 显示 左 89 / 右 80 / 盒 100，本插件的 BLE 广播通道与 GAIA 0x8207 通道在同一时刻给出完全相同的三个数值，逐值一致。测试环境：Windows 10 Home China 26H2（build 26300.9711），设备固件 2.19.7_2.19.7，GAIA 版本 3.3.1，连接方式 BLE 广播被动监听 + RFCOMM 私有通道。在线判定：读取系统 BluetoothDevice.ConnectionStatus（只读，不连接、不写设备），与「近期是否收到广播」合成，1 秒采样 + 3 秒去抖；判定离线后宿主移除该设备条目。已知限制：同系列长续航版 model 144/145 未实测，不在支持列表内；左右耳充电位（bit0/bit1）语义未验证，一律留未知；充电盒电量仅在「双耳在盒且盒盖开启」时可上报，属设备预期行为。"
   }
 }

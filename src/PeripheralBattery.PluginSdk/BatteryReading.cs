@@ -23,6 +23,17 @@ namespace PeripheralBattery.PluginSdk;
 /// <param name="LastSuccessfulReadUtc">最后一次成功读数时刻。</param>
 /// <param name="Source">数据来源，如 <c>BLE-Advertisement:0x0837</c>。</param>
 /// <param name="DiagnosticCode">诊断码，无异常时为 <c>null</c>。</param>
+/// <param name="IsPresent">
+/// 插件给出的<b>在线判定</b>：<c>true</c> = 设备在场、<c>false</c> = 已判定离线（宿主应移除该设备条目）、
+/// <c>null</c> = 插件未作判定（保持原有行为，不移除）。
+/// </param>
+/// <remarks>
+/// <b>为什么与 <see cref="IsConnected"/> 分开</b>：两者语义不同，不能互相替代。
+/// <see cref="IsConnected"/> 指「与本机是否保持经典蓝牙连接」，在线判定则是
+/// 「这台设备现在还在不在」——后者由<b>近期有广播 OR 经典蓝牙已连接</b>合成
+/// （两条路径互补盲区：连着本机放歌时广播被压制，靠连接态；未连本机时靠广播）。
+/// 若把「未与本机连接」误当成离线，会让靠广播正常取数的设备被错判。
+/// </remarks>
 public sealed record BatteryReading(
     string DeviceId,
     string DeviceName,
@@ -35,4 +46,5 @@ public sealed record BatteryReading(
     DateTimeOffset ObservedAtUtc,
     DateTimeOffset? LastSuccessfulReadUtc,
     string Source,
-    string? DiagnosticCode = null);
+    string? DiagnosticCode = null,
+    bool? IsPresent = null);

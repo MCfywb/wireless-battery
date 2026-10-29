@@ -95,6 +95,21 @@ public sealed record PluginReading
     [JsonPropertyName("connected")]
     public bool? Connected { get; set; }
 
+    /// <summary>
+    /// 插件给出的在线判定：<c>true</c> = 设备在场，<c>false</c> = 已判定离线，<c>null</c> = 未作判定。
+    /// </summary>
+    /// <remarks>
+    /// <para>与 <see cref="Connected"/> 的区别：<see cref="Connected"/> 是「与本机是否保持经典蓝牙连接」，
+    /// 本字段是「这台设备现在还在不在」。插件应综合两条互补的证据给出判定——
+    /// 近期收到广播（未连本机时的主要依据）<b>或</b> 经典蓝牙处于连接态
+    /// （连着本机放歌时广播被压制，此时只能靠连接态）。</para>
+    /// <para><c>false</c> 时宿主会<b>移除</b>该设备条目（用户已确认：判定离线即从列表消失）。
+    /// 兼容新增字段：不返回时视为 <c>null</c>，保持原有「只增不减」行为。</para>
+    /// </remarks>
+    [JsonPropertyName("present")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? Present { get; set; }
+
     [JsonPropertyName("quality")]
     public string Quality { get; set; } = nameof(ReadingQuality.Unavailable);
 

@@ -73,6 +73,25 @@ public sealed class PluginCapabilities
 
     [JsonPropertyName("usesNetwork")]
     public bool UsesNetwork { get; set; }
+
+    /// <summary>
+    /// 插件是否在读数中给出<b>在线判定</b>（<c>present</c> 字段）。
+    /// </summary>
+    /// <remarks>
+    /// <c>true</c> 时宿主会在判定离线后<b>移除</b>该设备条目；
+    /// 不声明（保持 <c>false</c>）则维持原有「只增不减」行为，保证向后兼容。
+    /// 在线判定只读系统已维护的蓝牙状态，不发起连接、不写设备，
+    /// 与 <see cref="ReadOnly"/> 不冲突。
+    /// </remarks>
+    [JsonPropertyName("reportsPresence")]
+    public bool ReportsPresence { get; set; }
+
+    /// <summary>
+    /// 是否支持按需主动读取（<see cref="PluginSdk.PluginMethods.ActiveRead"/>）。
+    /// </summary>
+    /// <remarks>按 D-010：宿主只在用户显式点击「立即刷新」时调用。</remarks>
+    [JsonPropertyName("activeRead")]
+    public bool ActiveRead { get; set; }
 }
 
 /// <summary>验证状态。枚举见 docs/development-plan.md §13.4。</summary>

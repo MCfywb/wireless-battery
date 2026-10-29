@@ -68,7 +68,34 @@ internal static class Program
     /// 规避了「按名字枚举在配对未连接时返回 0」的坑。Worker 是常驻进程，
     /// 设备被托盘显示前必已被动探明，故点击刷新时此处通常有值。
     /// </remarks>
+    /// <summary>
+    /// 近期广播窗口（毫秒）：在此窗口内收到过受支持广播即视为「在场」。
+    /// </summary>
+    /// <remarks>
+    /// 实测空闲时广播约 10 秒一条，取 30 秒留三倍余量，避免把稀疏广播误判成离线。
+    /// </remarks>
+    private const int RecentBroadcastWindowMs = 30000;
+
+    /// <summary>系统蓝牙状态探针的采样间隔（毫秒）。</summary>
+    private const int PresenceSampleIntervalMs = 1000;
+
+    /// <summary>
+    /// 系统蓝牙状态探针的去抖窗口（毫秒）。
+    /// </summary>
+    /// <remarks>
+    /// 2026-10-30 两次真机实测：耳机断电过程中 <c>ConnectionStatus</c> 会<b>瞬时回连一次</b>
+    /// （一次 6.04s 断、9.07s 又连；另一次 13.11s 断、30.26s 又连）。
+    /// 采信单次瞬时翻转会导致误判，故要求候选状态连续稳定 3 秒才升为稳定状态。
+    /// </remarks>
+    private const int PresenceDebounceMs = 3000;
+
     private static string? _lastMac;
+
+    /// <summary>最近一次收到受支持广播的时刻；在线判定的依据之一。</summary>
+    private static DateTimeOffset? _lastBroadcastUtc;
+
+    /// <summary>系统蓝牙状态探针（后台采样 + 去抖）。</summary>
+    private static BluetoothPresenceProbe? _presence;
 
     /// <summary>Worker 启动时刻；用于判断「尚未收到广播」是否只是无线电未就绪。</summary>
     private static DateTimeOffset _startedUtc;
@@ -94,6 +121,15 @@ internal static class Program
         // Windows 无线电初始化期间收到的广播会自然落在缓冲区，不会丢失。
         scanner.Start();
         _startedUtc = DateTimeOffset.UtcNow;
+
+        // 系统蓝牙状态探针：后台采样 ConnectionStatus，补上「连着本机放歌时广播被压制」的盲区。
+        // 只读系统已维护的状态，不发起连接、不写设备，与插件 readOnly 能力声明一致。
+        var name = matcher.Profile.BluetoothNamePrefixes.FirstOrDefault() ?? "vivo TWS 3i";
+        _presence = new BluetoothPresenceProbe(
+            name,
+            TimeSpan.FromMilliseconds(PresenceSampleIntervalMs),
+            TimeSpan.FromMilliseconds(PresenceDebounceMs));
+        _presence.Start();
 
         string? inputLine;
         while ((inputLine = Console.In.ReadLine()) is not null)
@@ -138,6 +174,9 @@ internal static class Program
             }
         }
 
+        // stdin 关闭（宿主退出 / shutdown）：先停探针再退出，避免后台采样任务残留在进程退出路径上。
+        _presence?.Dispose();
+
         return 0;
     }
 
@@ -155,7 +194,7 @@ internal static class Program
                 return Discover(request.RequestId, matcher, scanner);
 
             case PluginMethods.Poll:
-                return Poll(request.RequestId, matcher, scanner);
+                return await Poll(request.RequestId, matcher, scanner).ConfigureAwait(false);
 
             case PluginMethods.ActiveRead:
                 return await ActiveRead(request, matcher).ConfigureAwait(false);
@@ -258,6 +297,14 @@ internal static class Program
         var displayName = matcher.GetDisplayName(matcher.Profile.ModelIds.FirstOrDefault());
         var battery = result.Battery;
 
+        // 主动读取成功本身就是「设备在场」的强证据：刷新广播时间戳，
+        // 使后续若干秒内的在线判定不被「广播被压制」误判成离线。
+        _lastBroadcastUtc = now;
+        if (_presence is not null && result.DeviceId is { Length: > 3 } id)
+        {
+            await _presence.SetKnownMacAsync(id.Substring(3)).ConfigureAwait(false);
+        }
+
         return new PluginResponse
         {
             RequestId = requestId,
@@ -290,7 +337,10 @@ internal static class Program
             Component = component,
             Percentage = percentage,
             Charging = charging,
-            Connected = null,
+            // 主动读取走的是「连上设备」路径：能连上、握手成功并收到上报，
+            // 设备必然在场，故在线判定恒为 true（同时把系统连接态一并回填）。
+            Connected = _presence?.StableConnected,
+            Present = true,
             Quality = percentage is null
                 ? nameof(ReadingQuality.Unavailable)
                 : nameof(ReadingQuality.Reported),
@@ -339,7 +389,31 @@ internal static class Program
         return response;
     }
 
-    private static PluginResponse Poll(string requestId, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
+    /// <summary>
+    /// 在线判定。
+    /// </summary>
+    /// <remarks>
+    /// <para>两条证据<b>互补</b>，缺一不可：</para>
+    /// <list type="bullet">
+    /// <item><description>近期收到受支持广播——未连本机时的主要依据。</description></item>
+    /// <item><description>系统经典蓝牙处于连接态——连着本机放歌时 BLE 广播会被压制，
+    /// 此时<b>只有</b>系统连接态能证明设备还在。</description></item>
+    /// </list>
+    /// <para>两者都否定时才判离线；系统状态未知（<c>null</c>）时返回 <c>null</c>（不判定），
+    /// 宿主保持原有行为，避免把「探针还没就绪」误当成「设备走了」。</para>
+    /// </remarks>
+    private static bool? ComputePresent()
+    {
+        if (_lastBroadcastUtc is { } last
+            && (DateTimeOffset.UtcNow - last).TotalMilliseconds < RecentBroadcastWindowMs)
+        {
+            return true;
+        }
+
+        return _presence?.StableConnected;
+    }
+
+    private static async Task<PluginResponse> Poll(string requestId, VivoTws3iModelMatcher matcher, BleAdvertisementScanner scanner)
     {
         // 持续监听：扫描器在 Worker 启动后即常驻且事件驱动，会累积所有收到的广播。
         // Poll 只取「自上次取走以来」累积的载荷并立即返回，不再阻塞等待固定窗口。
@@ -381,6 +455,14 @@ internal static class Program
 
             chosen = adv;
             _lastMac = adv.MacAddress;
+            _lastBroadcastUtc = DateTimeOffset.UtcNow;
+
+            // 拿到 MAC 后让探针改用按地址精确匹配（比按名字枚举可靠）。
+            if (_presence is not null)
+            {
+                await _presence.SetKnownMacAsync(_lastMac).ConfigureAwait(false);
+            }
+
             break;
         }
 
@@ -392,10 +474,16 @@ internal static class Program
                 // 必须保留 DeviceId/DeviceName：宿主按设备标识归并读数，
                 // 标识一旦丢失就会被回退成「{插件 id}:default」，
                 // 在真实设备旁边凭空多出一台幽灵设备（托盘显示「共 2 台设备」）。
+                // 本轮没抓到新广播，正是「设备是不是走了」最需要回答的时刻：
+                // 必须把在线判定一并带回去，否则宿主无从知道该不该移除这台设备。
+                var stalePresent = ComputePresent();
+                diagnostics.Add($"presence:present={(stalePresent is null ? "unknown" : stalePresent.Value.ToString())}"
+                    + $" bleRecent={_lastBroadcastUtc is not null} bt={_presence?.LastRawStatus ?? "?"}");
+
                 var stale = new List<PluginReading>(_lastReadings.Count);
                 foreach (var r in _lastReadings)
                 {
-                    stale.Add(r.MarkStale("NO_FRESH_ADVERTISEMENT_IN_WINDOW"));
+                    stale.Add(r.MarkStale("NO_FRESH_ADVERTISEMENT_IN_WINDOW") with { Present = stalePresent });
                 }
 
                 diagnostics.Add($"stale:lastSuccessUtc={_lastSuccessUtc:O}");
@@ -429,14 +517,18 @@ internal static class Program
         var deviceName = matcher.GetDisplayName(chosen.ModelId);
         const string source = "BLE-Advertisement:0x0837";
 
+        // 本轮抓到了广播，设备必然在场；同时把系统连接态一并回填（Connected 字段此前恒为 null）。
+        var present = ComputePresent();
+        var connected = ResolveConnected(chosen.ConnectedState);
+
         var readings = new List<PluginReading>
         {
             BuildReading(deviceId, deviceName, "leftEarbud", chosen.LeftEarbudBattery,
-                chosen.LeftEarbudCharging, chosen.ConnectedState, chosen, now, source, "左耳"),
+                chosen.LeftEarbudCharging, connected, chosen, now, source, "左耳", present),
             BuildReading(deviceId, deviceName, "rightEarbud", chosen.RightEarbudBattery,
-                chosen.RightEarbudCharging, chosen.ConnectedState, chosen, now, source, "右耳"),
+                chosen.RightEarbudCharging, connected, chosen, now, source, "右耳", present),
             BuildReading(deviceId, deviceName, "chargingCase", chosen.ChargingCaseBattery,
-                chosen.ChargingCaseCharging, chosen.ConnectedState, chosen, now, source, "充电盒"),
+                chosen.ChargingCaseCharging, connected, chosen, now, source, "充电盒", present),
         };
 
         _lastReadings = readings;
@@ -461,7 +553,8 @@ internal static class Program
         VivoTwsAdvertisement adv,
         DateTimeOffset now,
         string source,
-        string componentName)
+        string componentName,
+        bool? present)
     {
         var diagnosticCode = percentage is null
             ? adv.Diagnostics.FirstOrDefault(d => d.Contains(componentName, StringComparison.Ordinal))
@@ -475,11 +568,22 @@ internal static class Program
             Percentage = percentage,
             Charging = charging,
             Connected = connected,
+            Present = present,
             Quality = percentage is null ? nameof(ReadingQuality.Unavailable) : nameof(ReadingQuality.Reported),
             Source = source,
             DiagnosticCode = diagnosticCode,
         };
     }
+
+    /// <summary>
+    /// 连接态取值：优先用系统蓝牙连接态（去抖后），未判定时回退广播自带的连接位。
+    /// </summary>
+    /// <remarks>
+    /// 广播里的 <c>ConnectedState</c> 是耳机自报的配对状态位，只表示「连着某个客户端」，
+    /// 不区分连的是电脑还是手机；系统侧的状态则明确指「与本机是否连接」，更准确。
+    /// </remarks>
+    private static bool? ResolveConnected(bool? broadcastConnected)
+        => _presence?.StableConnected ?? broadcastConnected;
 
     /// <summary>
     /// 在给定时间窗内收集广播。

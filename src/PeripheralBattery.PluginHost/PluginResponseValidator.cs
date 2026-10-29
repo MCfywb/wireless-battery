@@ -148,7 +148,8 @@ public static class PluginResponseValidator
                 observedAtUtc,
                 quality == ReadingQuality.Reported ? observedAtUtc : null,
                 reading.Source ?? string.Empty,
-                reading.DiagnosticCode));
+                reading.DiagnosticCode,
+                reading.Present));
         }
 
         return new PluginResponseValidation(true, null, readings);
