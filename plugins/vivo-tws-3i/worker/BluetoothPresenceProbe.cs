@@ -17,9 +17,20 @@ namespace VivoTws3i.Worker;
 /// 或在设备还在时误判离线。故只有<b>连续稳定若干秒</b>才认定状态变化。</para>
 /// <para><b>只读</b>：本类只查询系统已维护的状态，不发起连接、不写任何数据，
 /// 与插件 <c>readOnly: true</c> 的能力声明一致。</para>
+/// <para><b>绝不阻塞主请求路径</b>：WinRT 的 <c>DeviceInformation.FindAllAsync</c> /
+/// <c>BluetoothDevice.FromIdAsync</c> <b>本身没有超时</b>，蓝牙栈处于异常态（无线电未就绪、
+/// 正在切换、被系统挂起）时会无限挂起。因此本类所有蓝牙枚举都包了超时；
+/// 且 <see cref="SetKnownMacAsync"/> 只<b>后台触发</b>解析、立即返回，
+/// 调用方（Poll / ActiveRead 主线程）绝不 <c>await</c> 任何蓝牙调用——避免把整个 Worker 拖死。</para>
 /// </remarks>
 internal sealed class BluetoothPresenceProbe : IDisposable
 {
+    /// <summary>按地址解析的超时：后台触发、不阻塞主路径，给足余量即可。</summary>
+    private const int MacResolveTimeoutMs = 2500;
+
+    /// <summary>按名字兜底解析的超时：同样不阻塞主路径。</summary>
+    private const int NameResolveTimeoutMs = 3000;
+
     private readonly string _deviceName;
     private readonly TimeSpan _sampleInterval;
     private readonly TimeSpan _debounce;
@@ -75,40 +86,24 @@ internal sealed class BluetoothPresenceProbe : IDisposable
     }
 
     /// <summary>
-    /// 用已知 MAC 解析设备。被动广播探明 MAC 后调用，可显著提升命中率。
+    /// 用已知 MAC 解析设备。<b>后台触发，立即返回</b>，绝不阻塞调用方。
     /// </summary>
     /// <remarks>
-    /// 经验证本型号经典蓝牙地址 == BLE 地址，故按地址枚举能稳定命中，
-    /// 且不依赖设备是否处于可见态（按名字枚举在配对未连接时可能返回 0）。
+    /// <para>被动广播探明 MAC 后调用，可显著提升命中率。经验证本型号经典蓝牙地址 == BLE 地址，
+    /// 故按地址枚举能稳定命中，且不依赖设备是否处于可见态（按名字枚举在配对未连接时可能返回 0）。</para>
+    /// <para>本方法只把解析任务丢到后台；解析成功后由下一个采样周期（<see cref="ReadStatusAsync"/>）取用。
+    /// 调用方（Poll / ActiveRead）不需要、也不应当等待它——否则蓝牙栈异常时会拖死整个 Worker。</para>
     /// </remarks>
-    public async Task SetKnownMacAsync(string? mac)
+    public Task SetKnownMacAsync(string? mac)
     {
         if (!TryParseMac(mac, out var address))
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        BluetoothDevice? resolved = null;
-        try
-        {
-            var infos = await DeviceInformation
-                .FindAllAsync(BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(address))
-                .AsTask().ConfigureAwait(false);
-
-            if (infos.Count > 0)
-            {
-                resolved = await BluetoothDevice.FromIdAsync(infos[0].Id).AsTask().ConfigureAwait(false);
-            }
-        }
-        catch (Exception ex)
-        {
-            Console.Error.WriteLine($"按地址解析设备失败：{ex.GetType().Name}: {ex.Message}");
-        }
-
-        lock (_gate)
-        {
-            _device = resolved ?? _device;
-        }
+        // 后台触发，不等待：即便蓝牙栈此刻挂起，主请求路径也不受影响。
+        _ = ResolveByMacAsync(address);
+        return Task.CompletedTask;
     }
 
     /// <summary>启动后台采样。</summary>
@@ -132,13 +127,13 @@ internal sealed class BluetoothPresenceProbe : IDisposable
                 return;
             }
 
-            Sample();
+            await SampleAsync().ConfigureAwait(false);
         }
     }
 
-    private void Sample()
+    private async Task SampleAsync()
     {
-        bool? observed = ReadStatus();
+        bool? observed = await ReadStatusAsync().ConfigureAwait(false);
 
         lock (_gate)
         {
@@ -150,7 +145,7 @@ internal sealed class BluetoothPresenceProbe : IDisposable
         }
     }
 
-    private bool? ReadStatus()
+    private async Task<bool?> ReadStatusAsync()
     {
         BluetoothDevice? device;
         lock (_gate)
@@ -161,9 +156,8 @@ internal sealed class BluetoothPresenceProbe : IDisposable
         if (device is null && !_nameResolutionAttempted)
         {
             _nameResolutionAttempted = true;
-            // 尚未拿到 MAC：尝试按名字兜底解析一次（同步等待，采样频率 1 秒，
-            // 这里的 WinRT 枚举通常亚秒级返回，可接受）。
-            device = ResolveByName();
+            // 尚未拿到 MAC：尝试按名字兜底解析一次（带超时，绝不无限等待）。
+            device = await ResolveByNameAsync().ConfigureAwait(false);
             if (device is not null)
             {
                 lock (_gate)
@@ -189,15 +183,55 @@ internal sealed class BluetoothPresenceProbe : IDisposable
         }
     }
 
-    private BluetoothDevice? ResolveByName()
+    private async Task ResolveByMacAsync(ulong address)
     {
         try
         {
-            var infos = DeviceInformation
-                .FindAllAsync(BluetoothDevice.GetDeviceSelector())
-                .AsTask()
-                .GetAwaiter()
-                .GetResult();
+            var infos = await WithTimeout(
+                DeviceInformation
+                    .FindAllAsync(BluetoothDevice.GetDeviceSelectorFromBluetoothAddress(address))
+                    .AsTask(),
+                MacResolveTimeoutMs,
+                "probe:byAddress").ConfigureAwait(false);
+
+            if (infos is null || infos.Count == 0)
+            {
+                return;
+            }
+
+            var resolved = await WithTimeout(
+                BluetoothDevice.FromIdAsync(infos[0].Id).AsTask(),
+                MacResolveTimeoutMs,
+                "probe:byId").ConfigureAwait(false);
+
+            if (resolved is not null)
+            {
+                lock (_gate)
+                {
+                    _device = resolved;
+                    _nameResolutionAttempted = true;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"按地址解析设备失败：{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private async Task<BluetoothDevice?> ResolveByNameAsync()
+    {
+        try
+        {
+            var infos = await WithTimeout(
+                DeviceInformation.FindAllAsync(BluetoothDevice.GetDeviceSelector()).AsTask(),
+                NameResolveTimeoutMs,
+                "probe:findAll").ConfigureAwait(false);
+
+            if (infos is null)
+            {
+                return null;
+            }
 
             foreach (var info in infos)
             {
@@ -206,7 +240,11 @@ internal sealed class BluetoothPresenceProbe : IDisposable
                     continue;
                 }
 
-                var device = BluetoothDevice.FromIdAsync(info.Id).AsTask().GetAwaiter().GetResult();
+                var device = await WithTimeout(
+                    BluetoothDevice.FromIdAsync(info.Id).AsTask(),
+                    NameResolveTimeoutMs,
+                    "probe:fromId").ConfigureAwait(false);
+
                 if (device is not null)
                 {
                     return device;
@@ -219,6 +257,30 @@ internal sealed class BluetoothPresenceProbe : IDisposable
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 给 WinRT 蓝牙异步调用套一层超时。WinRT 的 <c>FindAllAsync</c> / <c>FromIdAsync</c> 自身无超时，
+    /// 蓝牙栈异常时会无限挂起，故必须自行限时。
+    /// </summary>
+    /// <remarks>
+    /// 超时后原任务仍在后台运行；用 <see cref="Task.ContinueWith(System.Action{System.Threading.Tasks.Task})"/>
+    /// 观察其异常，避免成为「未观察异常」。
+    /// </remarks>
+    private static async Task<T?> WithTimeout<T>(Task<T> task, int ms, string label)
+    {
+        var delay = Task.Delay(ms);
+        var completed = await Task.WhenAny(task, delay).ConfigureAwait(false);
+        if (completed != task)
+        {
+            Console.Error.WriteLine($"[warn] 蓝牙枚举超时（{label}，{ms}ms）");
+            _ = task.ContinueWith(
+                t => { _ = t.Exception; },
+                TaskContinuationOptions.OnlyOnFaulted);
+            return default;
+        }
+
+        return await task.ConfigureAwait(false);
     }
 
     /// <summary>把 <c>XX:XX:XX:XX:XX:XX</c> 解析为 48 位大端整数。</summary>
